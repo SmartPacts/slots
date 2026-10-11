@@ -1,0 +1,198 @@
+;; slots-internals-testing.repl — WHAT A ROUND FREEZES IS WHAT THE ROW SAID.
+;;
+;; Pact has no `private`. slots defines no `open-round` export: a round opens
+;; INLINE in `bet`, only when a board arrives, so there is no opener to reach.
+;;
+;; What this suite pins, through the only door there is: every term a round
+;; freezes -- the window, the share of the pot it may risk, the minimum and the
+;; beacon wait -- comes out of the game row, which only ADMIN writes, never from
+;; the board that opened the round. A board is { "entries": [...] } and nothing
+;; else, each entry a machine id, a stake per spin and a spin count;
+;; anything else on the board or on an entry, a board without its entries or an
+;; entry without its machine, is refused by the engine before a line of the
+;; module runs (IN-6).
+;;
+;; slots has no Banker commission and no cut card, so baccarat's IN-8 and IN-9
+;; have nothing to pin here and are deliberately absent.
+;;
+;; IN-0 is the control, and it is not optional: a board really does open a round,
+;; and the round it opens is the one after the last -- computed by the module,
+;; never named by the caller.
+
+(load "slots-test-init.repl")
+
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.initialize n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT 30000.0)
+(commit-tx)
+(env-sigs [{"key":"h0u5e00000000000000000000000000000000000000000000000000000000004"
+           ,"caps":[(coin.TRANSFER "house-funder" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 15000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.fund-house "house-funder" 15000.0)
+(commit-tx)
+(env-sigs [])
+
+(module inn IG (defcap IG () (enforce true "ok"))
+  (defconst ALICE "k:a11ce00000000000000000000000000000000000000000000000000000000001")
+  (defconst BOB   "k:b0b0000000000000000000000000000000000000000000000000000000000002"))
+
+;; ---------------------------------------------------------------- IN-0 control
+;; A board opens a round, and it is the round AFTER the last one.
+(env-chain-data { "block-time": (time "2027-03-01T00:00:00Z") })
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER inn.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 1.0)]}])
+(begin-tx)
+(expect "IN-0 PRECONDITION the last round opened is 0" 0 (at 'round-seq (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params)))
+(expect "IN-0 a board opens a round -- the first one" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet inn.ALICE { "entries": [{ "machine": 0, "stake": 0.1, "spins": 10 }] }))
+(expect "IN-0a which is the round AFTER the last one" 1 (at 'round-seq (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params)))
+(expect "IN-0b and the one now taking bets" 1 (at 'current (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params)))
+(commit-tx)
+(env-sigs [])
+
+;; ------------------------------------------- IN-1  the counter only ever ADVANCES
+;; The round number is round-seq + 1, read in the same call that writes it back,
+;; so a board has nothing to rewind WITH: after the close the next board opens
+;; the NEXT round, never the same one again.
+(env-chain-data { "block-time": (time "2027-03-01T00:00:31Z") })
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER inn.BOB (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 1.0)]}])
+(begin-tx)
+(expect "IN-1 a board after the close opens the NEXT round" "bet placed in round 2"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet inn.BOB { "entries": [{ "machine": 0, "stake": 0.1, "spins": 10 }] }))
+(expect "IN-1a the row agrees" 2 (at 'round-seq (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params)))
+(rollback-tx)
+(env-sigs [])
+
+;; ======================================================================
+;; IN-2..IN-5  WHAT A ROUND FREEZES IS WHAT THE ROW SAID
+;;   `set-params` writes the five dials; the opening board reads them. Every
+;;   value below is deliberately NOT the launch one, so an opener that ignored
+;;   the row and hard-coded the deploy constants goes RED. Each carries its own
+;;   CONTROL showing the launch value would have written something different.
+;;   🔴 Each assertion is its own top-level form on purpose: several `expect`s
+;;   inside one `let` print a SINGLE trace line carrying the last one's label.
+;; ======================================================================
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(expect "IN-2 PRECONDITION the admin writes non-launch dials" "params set"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.set-params 0.5 0.07 100000.0 300.0 240.0))
+(commit-tx)
+(env-sigs [])
+
+;; round 1 closed at 00:00:30; bob's board at 00:10:00 opens round 2 under the new
+;; dials. The stake reaches the new 0.07 minimum and the board fits the 50 % share.
+;; IN-5b is read in the same transaction, BEFORE the board: the pot's unreserved
+;; balance at that instant is what the round must record as its headroom.
+(env-chain-data { "block-time": (time "2027-03-01T00:10:00Z") })
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER inn.BOB (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 1.0)]}])
+(begin-tx)
+(let ((avail-before (at 'available (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status))))
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet inn.BOB { "entries": [{ "machine": 0, "stake": 0.1, "spins": 10 }] })
+  (expect "IN-5b the round's headroom is the pot's own unreserved balance the instant it opened, recomputed by the module"
+    avail-before (at 'avail-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 2))))
+(expect "IN-2 PRECONDITION the board opened round 2 under those dials" 2 (at 'round-seq (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params)))
+(commit-tx)
+(env-sigs [])
+
+;; IN-2  the window
+(begin-tx)
+(expect "IN-2a the round closes exactly one row-window after it opened"
+  (add-time (time "2027-03-01T00:10:00Z") 300.0)
+  (at 'close-time (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 2)))
+(expect "IN-2b CONTROL the launch window would have closed it somewhere else" false
+  (= (add-time (time "2027-03-01T00:10:00Z") n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.LAUNCH-BET-WINDOW)
+     (at 'close-time (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 2))))
+(commit-tx)
+
+;; IN-3  the share of the pot this round may put at risk
+(begin-tx)
+(expect "IN-3 the round carries exactly the row's share" 0.5
+  (at 'frac-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 2)))
+(expect "IN-3a CONTROL the launch share is a different number" false
+  (= n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.LAUNCH-RESERVE-FRACTION (at 'frac-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 2))))
+(commit-tx)
+
+;; IN-4  the table minimum
+(begin-tx)
+(expect "IN-4 the round carries exactly the row's minimum" 0.07
+  (at 'min-bet-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 2)))
+(expect "IN-4a CONTROL the launch minimum is a different number" false
+  (= n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.LAUNCH-MIN-BET (at 'min-bet-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 2))))
+(expect "IN-4b CONTROL and round 1, opened before set-params, kept the launch one" 0.01
+  (at 'min-bet-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)))
+(commit-tx)
+
+;; IN-5  the beacon wait -- asserted as the exact beacon the row's wait pins from
+;; the close-time the module itself wrote, so a round pinned from any other number
+;; goes red here.
+(begin-tx)
+(expect "IN-5 the round is pinned to the beacon the row's wait names"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.round-at
+    (add-time (at 'close-time (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 2)) 240.0))
+  (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 2)))
+(expect "IN-5a CONTROL the launch wait would have pinned a DIFFERENT beacon" false
+  (= (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.round-at
+       (add-time (at 'close-time (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 2)) n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.LAUNCH-DRAND-MARGIN))
+     (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 2))))
+(commit-tx)
+
+;; ------------------------------- IN-6  a board cannot hand in ANY term
+;; A board is { "entries": [{machine, stake, spins}, ...] }. A board carrying a
+;; round number, a window, a share, a minimum, a wait or its own total beside its
+;; entries, or an entry carrying any of them, is refused by the engine's own type
+;; check before a line of the module runs, and opens nothing; so is a board that
+;; leaves out its entries (the old one-machine shape), an entry that leaves out
+;; its machine or its spins, and a machine named as anything but an integer.
+;; 🔴 That refusal is the ENGINE's wording, observed on pact 5.4 for EVERY shape
+;; below (2026-09-28, each probed alone): "Runtime typecheck failure, argument is
+;; object , but expected type
+;; object{n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wager}". A malformed
+;; ENTRY is reported against the WAGER schema too, since the check is on bet's
+;; argument; it names this module's schema, which is what makes the string
+;; specific to this test.
+(env-chain-data { "block-time": (time "2027-03-01T00:20:00Z") })
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER inn.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 1.0)]}])
+(begin-tx)
+(expect-failure "IN-6 a board cannot name the round number"
+  "expected type object{n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wager}"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet inn.ALICE { "entries": [{ "machine": 0, "stake": 0.1, "spins": 10 }], "seq": 1 }))
+(expect-failure "IN-6a nor the window, the share, the minimum and the wait"
+  "expected type object{n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wager}"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet inn.ALICE { "entries": [{ "machine": 0, "stake": 0.1, "spins": 10 }], "bet-window": 1.0, "reserve-fraction": 1.0, "min-bet": 0.001, "drand-margin": 60.0 }))
+(expect-failure "IN-6b nor the board's own total"
+  "expected type object{n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wager}"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet inn.ALICE { "entries": [{ "machine": 0, "stake": 0.1, "spins": 10 }], "total": 100.0 }))
+(expect-failure "IN-6h nor an ENTRY carrying the round number"
+  "expected type object{n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wager}"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet inn.ALICE { "entries": [{ "machine": 0, "stake": 0.1, "spins": 10, "seq": 1 }] }))
+(expect-failure "IN-6i nor an entry carrying its own total, in the 2nd of two entries"
+  "expected type object{n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wager}"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet inn.ALICE { "entries": [{ "machine": 0, "stake": 0.1, "spins": 10 }, { "machine": 1, "stake": 0.1, "spins": 10, "total": 100.0 }] }))
+(expect-failure "IN-6e nor a board that leaves out its entries: the old one-machine shape is not a wager"
+  "expected type object{n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wager}"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet inn.ALICE { "machine": 0, "stake": 0.1, "spins": 10 }))
+(expect-failure "IN-6j nor entries given as one object instead of a list"
+  "expected type object{n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wager}"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet inn.ALICE { "entries": { "machine": 0, "stake": 0.1, "spins": 10 } }))
+(expect-failure "IN-6k nor an entry that leaves out its machine"
+  "expected type object{n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wager}"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet inn.ALICE { "entries": [{ "stake": 0.1, "spins": 10 }] }))
+(expect-failure "IN-6l nor a 2nd entry that leaves out its spins"
+  "expected type object{n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wager}"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet inn.ALICE { "entries": [{ "machine": 0, "stake": 0.1, "spins": 10 }, { "machine": 1, "stake": 0.1 }] }))
+(expect-failure "IN-6f nor one naming its machine as a decimal"
+  "expected type object{n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wager}"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet inn.ALICE { "entries": [{ "machine": 0.0, "stake": 0.1, "spins": 10 }] }))
+(expect-failure "IN-6g nor as a string"
+  "expected type object{n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wager}"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet inn.ALICE { "entries": [{ "machine": "0", "stake": 0.1, "spins": 10 }] }))
+(expect "IN-6c and no round was opened" 2 (at 'round-seq (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params)))
+(expect "IN-6d CONTROL the same board as { entries: [{machine, stake, spins}] } and nothing else opens round 3" "bet placed in round 3"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet inn.ALICE { "entries": [{ "machine": 0, "stake": 0.1, "spins": 10 }] }))
+(rollback-tx)
+(env-sigs [])
+
+(print "slots internals suite complete: a round opens on the row's terms, never the board's")

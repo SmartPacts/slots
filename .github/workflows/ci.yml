@@ -1,0 +1,109 @@
+name: ci
+
+# ===========================================================================
+# EVERYTHING THIS REPOSITORY CLAIMS, RUN ON EVERY PUSH.
+#
+# What runs in the `ci` job is exactly what you run locally:
+# pact/tests/run-tests.sh, unchanged, with no CI-only subset. A CI that runs a
+# reduced set teaches you to trust a green tick that means less than you think.
+#
+# The `ci` job reaches no network other than the pinned engine download. There
+# is no deploy step, no key and no secret: it cannot publish or sign anything.
+# The one job that does talk to a node, `onchain`, is read-only, is separate so
+# that the statement above stays true, and does not gate a push.
+# ===========================================================================
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # GitHub disables scheduled workflows in a public repository after 60 days
+  # without repository activity. After a quiet spell the weekly on-chain
+  # comparison stops silently: re-enable it, or run it by workflow_dispatch.
+  schedule:
+    - cron: '17 6 * * 1'        # the on-chain comparison, weekly
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # PINNED BY CONTENT, NOT BY TAG. A tag is mutable and a release asset can be
+  # replaced; the sha256 is what makes "CI ran Pact 5.4ce" a fact rather than a
+  # hope. Re-pin only when deliberately moving engine version, and re-measure
+  # BOTH values.
+  PACT_URL: https://github.com/kda-community/pact-5/releases/download/5.4ce/pact-5.4ce-b769-ubuntu-24.04.tar.gz
+  PACT_TARBALL_SHA256: 7370d33fa1e69474921bdd853a56c608c9eee89f73fe0a4f2e7215a7ce065849
+  PACT_BINARY_SHA256: 6c329662af8b06b8bf3b93fa886557769d9948ddd2899b94f465fe89f6339b16
+
+jobs:
+  ci:
+    if: github.event_name != 'schedule'
+    # 24.04 is not cosmetic: the pinned tarball is the ubuntu-24.04 build.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install Pact 5.4ce (content-pinned)
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 -o pact.tar.gz "$PACT_URL"
+          echo "${PACT_TARBALL_SHA256}  pact.tar.gz" | sha256sum -c -
+          mkdir -p pact-dist && tar xzf pact.tar.gz -C pact-dist
+          echo "${PACT_BINARY_SHA256}  pact-dist/pact" | sha256sum -c -
+          mkdir -p "$HOME/.local/bin" && install -m755 pact-dist/pact "$HOME/.local/bin/pact"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Engine identity
+        run: |
+          set -euo pipefail
+          command -v pact
+          pact --version
+          # The gates fail closed without python3. Prove it is here rather than
+          # discovering it as several identical failures further down.
+          python3 --version
+
+      # The published bytes are the bytes SHA256SUMS names. Weak on its own — it
+      # only says the file matches a checksum published in the same commit — but
+      # it makes a later tampering of one file without the other loud.
+      - name: Deploy bytes match their checksums
+        run: cd deploy-bytes && sha256sum -c SHA256SUMS
+
+      # The static gate, the arity gates, the deploy-bytes identity check, the
+      # frozen- and retuned-fixture derivations, the drand pin, the player-terms
+      # check, all eleven suites and the three inverted controls — the same
+      # script a reader runs.
+      - name: Full suite and gates
+        run: pact/tests/run-tests.sh
+
+      # PUBLICATION HYGIENE, ENFORCED FOREVER RATHER THAN ONCE. The scrub that
+      # made this repository publishable is only as durable as the check that
+      # repeats it: a one-time removal decays the next time a paragraph is
+      # copied in from somewhere internal.
+      - name: Publication hygiene
+        run: .github/scripts/public-hygiene-check.sh
+
+  # Is mainnet still running this code? Read-only, unsigned, and free. It is a
+  # separate job because it is the only thing here that talks to a node, and
+  # because a public node being down is not a reason to fail somebody's pull
+  # request. It runs weekly and on demand.
+  onchain:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: The chain is running deploy-bytes/, character for character
+        run: |
+          set -euo pipefail
+          for m in slots drand; do
+            python3 .github/scripts/fetch-onchain.py "$m" > "/tmp/onchain-$m.pact"
+            python3 .github/scripts/compare-onchain.py "$m" "/tmp/onchain-$m.pact"
+            # Assigned first so a failed fetch stops the job; inside `echo "$(…)"`
+            # its exit status would be discarded and the step would stay green.
+            hash=$(python3 .github/scripts/fetch-onchain.py "$m" --hash)
+            echo "   module hash on chain: $hash"
+          done

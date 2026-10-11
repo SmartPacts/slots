@@ -1,0 +1,22 @@
+Slots
+Copyright 2026 Smart Pacts
+
+This product includes software developed at Smart Pacts.
+
+VENDORED. Under pact/vendor/ are copies of code the contract depends on, kept only so the test
+suite can load the dependencies the contract compiles against:
+
+  * fixtures/coin.pact, fixtures/fungible-v2.pact, fixtures/fungible-xchain-v1.pact —
+    Kadena's coin contract (a test fixture of it) and fungible interfaces. Not ours.
+
+They are not part of the deployed artifact. On chain the contract resolves the real `coin` by
+name.
+
+NOT VENDORED, and not ours either: the randomness. The reels come from the drand
+beacon, produced by the League of Entropy outside Kadena. This repository contains the on-chain
+VERIFIER for it (pact/modules/drand.pact, ours), not the beacon. The verifier's public key and
+chain hash name drand's evmnet chain (bls-bn254-unchained-on-g1); drand is a separate project
+with its own licence, at drand.love.
+
+The helper under crank/ uses @kadena/client and @kadena/cryptography-utils, which are Kadena's
+and carry their own licences.

@@ -1,0 +1,17 @@
+;; slots-open-round-must-fail.repl — INVERTED CONTROL: this file must FAIL to run.
+;;
+;; Slots opens a round INLINE in `bet`, with every term read from the game row, the
+;; same design baccarat adopted before its deployment, in place of a separate
+;; `open-round` export gated by an argument-free true-bodied token. Pact has no
+;; `private`: every export is a door somebody other than the module might find a
+;; way to open, and the only door that cannot be opened is one that does not
+;; exist. So the module DEFINES NO SUCH EXPORT and a module that names it cannot even load. The
+;; gate runs this file and requires exit 1 with the engine's
+;; "has no such member: open-round". If the export ever appears, this file loads
+;; clean, the gate turns RED, and the reachable surface is caught before a freeze.
+(load "slots-test-init.repl")
+(begin-tx)
+(module reach RG (defcap RG () (enforce true "ok"))
+  (defun open:integer () (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.open-round)))
+(commit-tx)
+(print "UNEXPECTED: a module naming open-round loaded -- the export is back")

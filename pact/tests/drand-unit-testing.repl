@@ -1,0 +1,229 @@
+;; drand-unit-testing.repl — n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand against REAL drand beacons.
+;;
+;; Every (round, signature) below was fetched from api.drand.sh for chain
+;; 04f1e9062b8a81f848fded9c12306733282b2727ecced50032187751166ec8c3
+;; (beacon id evmnet, scheme bls-bn254-unchained-on-g1, period 3s)
+;; and is used unmodified, exactly as the API returned it.
+;; This file is GENERATED from that JSON — no hex is transcribed by hand.
+;;
+;; Positive: 11 real beacons verify, and each yields a stable seed.
+;; Negative: a signature replayed on another round, a signature whose y is negated
+;; (a change that stays ON the curve, so it exercises the pairing and not the
+;; input gate), the point at infinity, a malformed length, and a seed that must
+;; change with the round key.
+
+(load "drand-test-init.repl")
+
+;; ------------------------------------------------------------------- THE SEAL
+;; 🔴 Governance is `(enforce false)` and NOTHING asserted it. That
+;; seal is the whole reason roulette may pin this module by hash and rely on the
+;; pin: an upgradable verifier could be replaced under a deployed table, and the
+;; verifier is the only thing standing between a real beacon and a forged one.
+;; It is also why this module holds no table -- a sealed module can never be
+;; given one later (an upgrade does not create tables, and there are no upgrades).
+(begin-tx)
+(expect-failure "the verifier can NEVER be upgraded, on any key"
+  "drand verifier governance is sealed"
+  (acquire-module-admin n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand))
+(commit-tx)
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(expect-failure "not even with the governance key signing"
+  "drand verifier governance is sealed"
+  (acquire-module-admin n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand))
+(commit-tx)
+(env-sigs [])
+
+;; ---------------------------------------------------------------- CHAIN PIN
+(begin-tx)
+(expect "the pinned chain hash is the evmnet chain"
+  "04f1e9062b8a81f848fded9c12306733282b2727ecced50032187751166ec8c3" n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.CHAIN-HASH)
+(expect "drand genesis and period match /info" [1727521075 3]
+  [n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.GENESIS n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.PERIOD])
+(commit-tx)
+
+;; ------------------------------------------------------------ ROUND <-> TIME
+(begin-tx)
+(expect "round 1 is published at genesis" (time "2024-09-28T10:57:55Z")
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.time-of-round 1))
+(expect "round-at inverts time-of-round" 20801767
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.round-at (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.time-of-round 20801767)))
+(expect "a round lasts exactly one period" 3
+  (round (diff-time (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.time-of-round 1001) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.time-of-round 1000))))
+(expect-failure "a time before genesis has no round" "precedes the drand chain genesis"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.round-at (time "2020-01-01T00:00:00Z")))
+(expect-failure "there is no round 0" "drand rounds start at 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.time-of-round 0))
+(commit-tx)
+
+;; ------------------------------------------------------- REAL BEACONS VERIFY
+(env-gasmodel "table")
+(env-gaslimit 150000)
+(begin-tx)
+(expect "round 1: a real drand beacon verifies" true
+  (> (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verified-seed "roulette|1" 1 "11f812d738a36b2210dc88c2d635ad8039588205f42445d6de09e6530165c3462a23aca348c84badcf8df5321ac24577b7963d5b0d780bc4626baedb45cde373") 0))
+(expect "round 2: a real drand beacon verifies" true
+  (> (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verified-seed "roulette|1" 2 "1dbfe644485f31e2a7978fb551b50933b0001e64397fd2b7dc4022e8e2fcdbc325798cea5506deec489c8db3b4697f6b1bb6be8934b95bd9c0db88923487d9ad") 0))
+(expect "round 1000000: a real drand beacon verifies" true
+  (> (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verified-seed "roulette|1" 1000000 "139a803860ff6d842b822b8b37eaeccc4e278dd44440535a976530a1a503e85e11d84b824f18e608a85e627e6b1b08322060cbcf7eca1ea78489252907e8473a") 0))
+(expect "round 20801559: a real drand beacon verifies" true
+  (> (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verified-seed "roulette|1" 20801559 "10365909bcd52d14f02ae878789f38783eaf05c9df54c420d38d6329de81004813cb56b0c48ca998ee746d786dc88fcdd304f93f64a22ab9d3a8e3e7e44420bb") 0))
+(expect "round 20801767: a real drand beacon verifies" true
+  (> (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verified-seed "roulette|1" 20801767 "0d745db068db9e16379a49f65d76353d721d79fb459d20b33a50e750e5cdb10400af36e03d4a8414b3a86770d1d1e90e85462dce40b3cf5c27f9fdb477b6f6e0") 0))
+(expect "round 20801768: a real drand beacon verifies" true
+  (> (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verified-seed "roulette|1" 20801768 "3046d0014da5e70c6a4c99fc5fafde0cc68ae79d82ece3177dc7d6147945cfb502d3ce355c42c98368f003bf089aebb110ee7119f62d6402a2187d58f44f297a") 0))
+(expect "round 20801769: a real drand beacon verifies" true
+  (> (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verified-seed "roulette|1" 20801769 "007bd78a0ace946e2baa1f952483e7698bf77d637f4837544d7f65bfa6a28c0f16e42109519eed5ea932b4d7eabbd5ac5081172fd987a2eabb0aa712f4682a6c") 0))
+(expect "round 20801770: a real drand beacon verifies" true
+  (> (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verified-seed "roulette|1" 20801770 "249463244d57ade6d549b34b2420ecb82387180320bc9dadb4fd245d73ea0e3c14d6b5c9b44397dc1f6f269e31006c4d7f7e1c310ea5d1b5ca90fb298fa35b39") 0))
+(expect "round 20802058: a real drand beacon verifies" true
+  (> (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verified-seed "roulette|1" 20802058 "19d1a6c9bf554b87d004b73acccad64cc0b4370735b609369f92a9a53e8a07870651464a0b393ef8c607ff05eab5dd7b870ff5dfafda7140e0e2ed10387d3160") 0))
+(expect "round 20802059: a real drand beacon verifies" true
+  (> (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verified-seed "roulette|1" 20802059 "090610f4d8155e4d56b23988d4f0a0451e42a3cc2c296cf4bc98f5f3bbfed1a811d2467d48083eabef7f856e0e9198166abc9a67de356bee250adf30d4a3c5c7") 0))
+(expect "round 20802172: a real drand beacon verifies" true
+  (> (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verified-seed "roulette|1" 20802172 "1f5b04f99e8ed51bbe06ffd960a7e6e421465bd5e0e873aade49e236a3131f06000addb82c5de70f69d0305dbb2a99d88da2d527bdd7ce9fd307263727445361") 0))
+(commit-tx)
+;; ------------------------------------------------------- SEED IS WELL-BEHAVED
+(begin-tx)
+(expect "the same beacon and key always give the same seed" true
+  (= (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verified-seed "roulette|7" 20801768 "3046d0014da5e70c6a4c99fc5fafde0cc68ae79d82ece3177dc7d6147945cfb502d3ce355c42c98368f003bf089aebb110ee7119f62d6402a2187d58f44f297a")
+     (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verified-seed "roulette|7" 20801768 "3046d0014da5e70c6a4c99fc5fafde0cc68ae79d82ece3177dc7d6147945cfb502d3ce355c42c98368f003bf089aebb110ee7119f62d6402a2187d58f44f297a")))
+(expect "a different round key gives a different seed" false
+  (= (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verified-seed "roulette|7" 20801768 "3046d0014da5e70c6a4c99fc5fafde0cc68ae79d82ece3177dc7d6147945cfb502d3ce355c42c98368f003bf089aebb110ee7119f62d6402a2187d58f44f297a")
+     (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verified-seed "roulette|8" 20801768 "3046d0014da5e70c6a4c99fc5fafde0cc68ae79d82ece3177dc7d6147945cfb502d3ce355c42c98368f003bf089aebb110ee7119f62d6402a2187d58f44f297a")))
+(expect "a different beacon gives a different seed" false
+  (= (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verified-seed "roulette|7" 20801768 "3046d0014da5e70c6a4c99fc5fafde0cc68ae79d82ece3177dc7d6147945cfb502d3ce355c42c98368f003bf089aebb110ee7119f62d6402a2187d58f44f297a")
+     (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verified-seed "roulette|7" 20801769 "007bd78a0ace946e2baa1f952483e7698bf77d637f4837544d7f65bfa6a28c0f16e42109519eed5ea932b4d7eabbd5ac5081172fd987a2eabb0aa712f4682a6c")))
+(expect "the hex is case-insensitive: one beacon, one seed" true
+  (= (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verified-seed "roulette|7" 20801768 "3046d0014da5e70c6a4c99fc5fafde0cc68ae79d82ece3177dc7d6147945cfb502d3ce355c42c98368f003bf089aebb110ee7119f62d6402a2187d58f44f297a")
+     (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verified-seed "roulette|7" 20801768 "3046D0014DA5E70C6A4C99FC5FAFDE0CC68AE79D82ECE3177DC7D6147945CFB502D3CE355C42C98368F003BF089AEBB110EE7119F62D6402A2187D58F44F297A")))
+(commit-tx)
+
+;; --------------------------------------------------- NEGATIVE: FORGERY FAILS
+(begin-tx)
+(expect-failure "a real signature REPLAYED on another round is refused"
+  "drand signature does not verify"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verified-seed "roulette|7" 20801769 "3046d0014da5e70c6a4c99fc5fafde0cc68ae79d82ece3177dc7d6147945cfb502d3ce355c42c98368f003bf089aebb110ee7119f62d6402a2187d58f44f297a"))
+(expect-failure "the point at infinity is not a signature"
+  "the point at infinity is not a signature"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verified-seed "roulette|7" 20801768 "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"))
+;; 🔴 G1 has a short/long negative pair; G2 had NONE, and its length
+;; check survived deletion. This module is SEALED and its header argues bounds
+;; belong here "rather than in whoever calls it next" precisely because it is
+;; meant to be reused -- so the bound a future caller relies on has to be pinned,
+;; not merely present. Today roulette never reaches it (the only caller is the
+;; PK-HEX defconst), which is exactly why nothing caught it.
+(expect-failure "a short G2 is refused" "G2 must be 128 bytes"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.g2-from-hex (concat (make-list 255 "a"))))
+(expect-failure "a long G2 is refused" "G2 must be 128 bytes"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.g2-from-hex (concat (make-list 257 "a"))))
+(expect "and exactly 128 bytes is accepted" 4
+  (+ (length (at 'x (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.g2-from-hex (concat (make-list 256 "a")))))
+     (length (at 'y (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.g2-from-hex (concat (make-list 256 "a")))))))
+(expect-failure "a short signature is refused" "G1 must be 64 bytes"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verified-seed "roulette|7" 20801768 "3046d0014da5e70c6a4c99fc5fafde0cc68ae79d82ece3177dc7d6147945cfb502d3ce355c42c98368f003bf089aebb110ee7119f62d6402a2187d58f44f29"))
+(expect-failure "a long signature is refused" "G1 must be 64 bytes"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verified-seed "roulette|7" 20801768 "3046d0014da5e70c6a4c99fc5fafde0cc68ae79d82ece3177dc7d6147945cfb502d3ce355c42c98368f003bf089aebb110ee7119f62d6402a2187d58f44f297a00"))
+(commit-tx)
+
+(begin-tx)
+;; y -> -y keeps the point ON the curve, so this tests the PAIRING, not the
+;; on-curve input gate that a random bit-flip would trip first.
+(expect-failure "a curve-valid but wrong signature (y negated) is refused"
+  "drand signature does not verify"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verified-seed "roulette|7" 20801768 "3046d0014da5e70c6a4c99fc5fafde0cc68ae79d82ece3177dc7d6147945cfb52d90803d84eed6a64f6041f778e66cac8692f9777244668a9a080ebde42dd3cd"))
+(commit-tx)
+
+;; ------------------------------------------------ NEGATIVE: OFF THE CURVE
+;; 🔴 THE GAP THE LENGTH AND CANONICALITY CHECKS DO NOT COVER. A 128-hex string
+;; whose two coordinates are both BELOW the field modulus passes `g1-from-hex`
+;; in full -- right length, canonical, not the point at infinity -- and is still
+;; not a point on y^2 = x^3 + 3. Nothing in this module tests for that; the
+;; refusal comes from the pairing native itself, and until now nothing pinned
+;; that it comes at all. The probe is a REAL beacon with its y incremented by
+;; one, so the only property that differs from the control below is membership
+;; of the curve.
+;; 🔴 IT IS A FATAL ERROR, NOT A RECOVERABLE ONE: `try` does NOT catch it
+;; (measured -- the error escapes the handler and ends the run), so no caller can
+;; swallow it and carry on with an unchecked beacon. `expect-failure` does catch
+;; it, which is why it can be asserted here at all.
+(begin-tx)
+(expect "CONTROL x and y really are both below the field modulus"
+  true
+  (let ((g (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.g1-from-hex "3046d0014da5e70c6a4c99fc5fafde0cc68ae79d82ece3177dc7d6147945cfb502d3ce355c42c98368f003bf089aebb110ee7119f62d6402a2187d58f44f297b")))
+    (and (< (at 'x g) n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.P) (< (at 'y g) n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.P))))
+(expect "CONTROL and it really is off the curve: y^2 != x^3 + 3"
+  false
+  (let* ( (g (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.g1-from-hex "3046d0014da5e70c6a4c99fc5fafde0cc68ae79d82ece3177dc7d6147945cfb502d3ce355c42c98368f003bf089aebb110ee7119f62d6402a2187d58f44f297b"))
+          (x (at 'x g)) (y (at 'y g)) )
+    (= (mod (* y y) n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.P) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.gx x))))
+(expect-failure "a canonical, on-field point that is NOT on the curve is refused"
+  "Point lies outside of elliptic curve"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verified-seed "roulette|7" 20801768 "3046d0014da5e70c6a4c99fc5fafde0cc68ae79d82ece3177dc7d6147945cfb502d3ce355c42c98368f003bf089aebb110ee7119f62d6402a2187d58f44f297b"))
+(expect "CONTROL the same beacon with its genuine y still verifies" true
+  (> (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verified-seed "roulette|7" 20801768 "3046d0014da5e70c6a4c99fc5fafde0cc68ae79d82ece3177dc7d6147945cfb502d3ce355c42c98368f003bf089aebb110ee7119f62d6402a2187d58f44f297a") 0))
+(commit-tx)
+
+;; ------------------------------------------ NEGATIVE: A DIFFERENT PUBLIC KEY
+;; 🔴 NOTHING MEASURED THE KEY ARGUMENT AT ALL. Every existing test calls
+;; `verified-seed`, which always passes the pinned PK, so `verify` could ignore
+;; its `pk` parameter entirely -- or substitute a constant -- and the whole suite
+;; would stay green. That is the "BLOCKED is only evidence if the same payload is
+;; measured OPEN somewhere" rule: a genuine beacon verifying proves the key is
+;; RIGHT, never that a WRONG key would be rejected.
+;; Both probes are valid G2 points built from this module's own constants, so a
+;; refusal cannot be a malformed-input refusal in disguise: the negated generator
+;; NEG-G2, and the generator itself (NEG-G2's x with the un-negated y).
+(begin-tx)
+(expect "a genuine beacon verifies against the PINNED evmnet key" true
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verify n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.PK 20801768
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.g1-from-hex "3046d0014da5e70c6a4c99fc5fafde0cc68ae79d82ece3177dc7d6147945cfb502d3ce355c42c98368f003bf089aebb110ee7119f62d6402a2187d58f44f297a")))
+(expect "the SAME beacon does not verify against the negated G2 generator" false
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verify n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.NEG-G2 20801768
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.g1-from-hex "3046d0014da5e70c6a4c99fc5fafde0cc68ae79d82ece3177dc7d6147945cfb502d3ce355c42c98368f003bf089aebb110ee7119f62d6402a2187d58f44f297a")))
+(expect "nor against the G2 generator itself" false
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verify
+    { "x": (at 'x n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.NEG-G2), "y": [n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.G2Y0 n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.G2Y1] }
+    20801768
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.g1-from-hex "3046d0014da5e70c6a4c99fc5fafde0cc68ae79d82ece3177dc7d6147945cfb502d3ce355c42c98368f003bf089aebb110ee7119f62d6402a2187d58f44f297a")))
+(commit-tx)
+
+;; ------------------------------------------------------------------- GAS
+(begin-tx)
+(env-gas 0)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verified-seed "roulette|1" 20801768 "3046d0014da5e70c6a4c99fc5fafde0cc68ae79d82ece3177dc7d6147945cfb502d3ce355c42c98368f003bf089aebb110ee7119f62d6402a2187d58f44f297a")
+(expect "one verified-seed stays well inside a 150,000 transaction" true
+  (< (env-gas) 25000))
+(print (format "GAS n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verified-seed: {}" [(env-gas)]))
+(commit-tx)
+;; ----------------------------------------- NEGATIVE: ENCODING MALLEABILITY
+;; 🔴 A 32-byte coordinate holds values up to 2^256-1 while the field modulus P
+;; is ~2^254, and the pairing native reduces its input mod P. So x, x+P, x+2P...
+;; are the SAME point and all verify. Before this was refused, ONE real beacon
+;; produced wheel positions 33, 31, 30, 11, 22 and 32 from six encodings -- and
+;; submitting the beacon is permissionless, so the submitter chose the number.
+(begin-tx)
+(expect-failure "a non-canonical x (x + P) is refused"
+  "G1 coordinates must be canonical"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verified-seed "roulette|7" 20801767 "3dd8ac234a0d3e3fefea8facdef78d9b099ee48cae0eeb4076717367be4aae4b00af36e03d4a8414b3a86770d1d1e90e85462dce40b3cf5c27f9fdb477b6f6e0"))
+(expect-failure "a non-canonical y (y + P) is refused"
+  "G1 coordinates must be canonical"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verified-seed "roulette|7" 20801767 "0d745db068db9e16379a49f65d76353d721d79fb459d20b33a50e750e5cdb104311385531e7c243e6bf8ad275353416c1cc7985fa92599e9641a89cb5033f427"))
+(expect-failure "both coordinates shifted is refused"
+  "G1 coordinates must be canonical"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verified-seed "roulette|7" 20801767 "9ea149090c707e93608b1b19e1fa3e5638a1b9af7ef2805aeeb28b956f44a8d96177d3c5ffadc4682448f2ddd4d499c9b44902f111976476a03b15e228b0f16e"))
+(expect "CONTROL the canonical encoding of that same beacon still verifies" true
+  (> (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verified-seed "roulette|7" 20801767 "0d745db068db9e16379a49f65d76353d721d79fb459d20b33a50e750e5cdb10400af36e03d4a8414b3a86770d1d1e90e85462dce40b3cf5c27f9fdb477b6f6e0") 0))
+(commit-tx)
+
+;; ------------------------------------------ NEGATIVE: ROUND NUMBER WRAPPING
+;; b64f encodes exactly 8 bytes and wraps silently above that, so r and r + 2^64
+;; would hash identically while the raw r goes into the seed.
+(begin-tx)
+(expect-failure "a round beyond 8 bytes is refused" "drand round out of range"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verified-seed "roulette|7" 18446744073730353383 "0d745db068db9e16379a49f65d76353d721d79fb459d20b33a50e750e5cdb10400af36e03d4a8414b3a86770d1d1e90e85462dce40b3cf5c27f9fdb477b6f6e0"))
+(expect-failure "round zero is refused" "drand round out of range"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verified-seed "roulette|7" 0 "0d745db068db9e16379a49f65d76353d721d79fb459d20b33a50e750e5cdb10400af36e03d4a8414b3a86770d1d1e90e85462dce40b3cf5c27f9fdb477b6f6e0"))
+(commit-tx)
+
+(print "drand unit tests complete")

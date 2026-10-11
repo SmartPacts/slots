@@ -1,0 +1,47 @@
+{
+  "_what": "The recorded identity of the deployed artifact. Scripts read the namespace and the module names from here rather than restating them, so a gate cannot compare a constant with itself.",
+  "network": "mainnet01",
+  "chain": "2",
+  "ns": "n_48867b242317a0216a67f8c7ca26696b5878e0e3",
+  "deployed": "2026-10-11",
+  "node_read_back": "2026-10-11",
+  "nodes_read": ["https://api.chainweb-community.org", "https://chainweb.eckowallet.com"],
+  "modules": {
+    "slots": {
+      "module_hash_on_chain": "Ahc4KT2wIf17_U0WhoCRp2zNxFnHXpeh5T1VYk5awzs",
+      "_module_hash_note": "MEASURED on chain, from both nodes, never computed locally. A Pact 5 module hash covers its dependencies' hashes; slots depends on coin, and the test suite loads a vendored coin snapshot while mainnet runs a different coin — so a hash computed here will NEVER equal this one and proves nothing. VERIFY.md compares the CODE instead.",
+      "deploy_tx": "XUYTKgx6t9djEwJbbJVvJ0lIRYRmluxb8MEE_M2T53E",
+      "deploy_bytes": "deploy-bytes/slots.pact",
+      "deploy_bytes_sha256": "a64d3c3d8183344f9a9efc5463f2854db420e167bb8bc37b8dc8f5625b7a9df4",
+      "annotated_source_sha256": "6d4461fdcc8469ad093123bc2f8bc61f507e8346ea889a2e6366576b3f2a7623",
+      "_annotated_source_note": "pact/modules/slots.pact is, byte for byte, the code the deploy transaction carried; deploy-bytes/slots.pact is its (module …) region, which is what describe-module returns.",
+      "chars_on_chain": 49105,
+      "frozen": false,
+      "governance": "n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-gov"
+    },
+    "drand": {
+      "module_hash_on_chain": "Y07t-duJmkXkcGth0TfBRg3ThbNR-uh9PdNUd1MKHBQ",
+      "_module_hash_note": "For THIS module a hash comparison is valid and is worth running: drand has no dependencies, holds no table and uses no other module, so the hash the REPL computes from pact/modules/drand.pact equals the one mainnet reports. It is also the literal slots pins in its `use`.",
+      "deploy_bytes": "deploy-bytes/drand.pact",
+      "deploy_bytes_sha256": "4df5d5dca13bcc64bdd55a9666b2b958073cf34a7166d26486d84795132efd24",
+      "chars_on_chain": 10324,
+      "frozen": true,
+      "governance": "(enforce false) — sealed at deploy; it can never be upgraded",
+      "deployed_for": "roulette, on 2026-09-22; slots uses the same deployed module and deployed no verifier of its own"
+    }
+  },
+  "crank": {
+    "tarball": "slots-crank-bd66035348fe.tar.gz",
+    "tarball_sha256": "95e8382f75dff3de1c9626757df17a9a4a0147347fd4e1af7c62b0fce9ed9c72",
+    "_note": "The helper tarball the house's two helpers run, packed from the private repository at the commit the module was tagged from, reproducibly. Not published; deployments/mainnet01-chain-2.md says how its files differ from crank/ here."
+  },
+  "beacon": {
+    "source": "drand",
+    "chain_hash": "04f1e9062b8a81f848fded9c12306733282b2727ecced50032187751166ec8c3",
+    "scheme": "bls-bn254-unchained-on-g1",
+    "period_seconds": 3,
+    "_note": "slots pins the verifier by hash in its `use`, so it cannot silently settle from different verifier code. pact/tests/slots-pin-must-fail.repl is the control that proves the pin bites."
+  },
+  "audit_status": "INTERNAL_REVIEW",
+  "_audit_note": "Reviewed internally, including from cold contexts by reviewers with no implementation history and by offensive engagements that executed their attacks. That is NOT a paid third-party engagement, and we do not present it as one. No external firm has been paid to review this contract."
+}

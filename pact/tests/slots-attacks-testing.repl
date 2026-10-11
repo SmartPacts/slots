@@ -1,0 +1,1590 @@
+;; slots-attacks-testing.repl — attacks that MUST fail, executed.
+;;
+;; The pot is guarded by this module's own MODULE GUARD, so there is no capability
+;; anyone could compose to reach it: the only route left is the one A-1 takes, a
+;; foreign module transferring straight out of the pot. That is refused by the
+;; guard itself -- the module is not on the caller's stack, so the guard falls
+;; through to module admin -- and the refusal is coin's own guard check.
+;; A-1d is the other half: the SAME transfer, with module admin acquired,
+;; SUCCEEDS. Without it A-1 could not tell "the guard refused it" from "this attack
+;; was never viable", and pre-freeze custody by the admin key would be a claim
+;; rather than a measurement.
+;;
+;; Slots has no shared pool between rounds: every board is played from its own
+;; round's seed and its own account, so rounds settle in any order. What slots
+;; adds instead is the BOARD: a player chooses how many spins to buy. A-9 pins
+;; that the spin count cannot pick an outcome (spins are a prefix-stable
+;; sequence), A-10 that a losing board releases exactly what it reserved, A-11
+;; that no board can be paid more than it reserved, and A-12 that nobody can join
+;; a round once its betting window has closed.
+;;
+;; Six machines. Every front above A-14 plays the classic machine
+;; (id 0, 40x), whose stops and payouts are exactly those of the single-machine
+;; module. A-14 pins that a board's machine is decided by its own row, never by
+;; whoever claims or resolves it; A-15 that no spin on any machine returns more
+;; than that machine's maximum (the spin cap); A-16 that an unknown machine id
+;; opens no round and reserves nothing.
+;;
+;; A board plays one machine: a wager is { "entries": [...] } holding exactly
+;; one entry. A-17 pins that a second machine cannot join a round from the same account,
+;; neither as a second board nor as a second entry, and that the board row is what is
+;; played; A-18 the prefix property; A-19 solvency; A-20 the machine-id and one-entry
+;; boundaries, with no state change.
+;;
+;; A winning claim returns its payout floored at twelve places, and Pact prints such
+;; a decimal with all twelve ("paid 0.900000000000"); a void refund is not floored
+;; and prints as it is ("paid 2.0").
+;;
+;; Every expected stop, unit count and payout below that is not the specification's
+;; measured round-1 outcome was produced by the independent Python oracle
+;; (BLAKE2b-256 -> base64url -> big-endian integer, sliced into three 6-bit
+;; stops), from seeds read off the verifier, and embedded as literals.
+
+(load "slots-test-init.repl")
+
+(begin-tx)
+(module atk AG (defcap AG () (enforce true "ok"))
+  (defconst ALICE   "k:a11ce00000000000000000000000000000000000000000000000000000000001")
+  (defconst BOBBY   "k:b0b0000000000000000000000000000000000000000000000000000000000002")
+  (defconst MALLORY "k:ca40100000000000000000000000000000000000000000000000000000000003")
+  ;; genuine drand evmnet signatures
+  (defconst SIG68  "3046d0014da5e70c6a4c99fc5fafde0cc68ae79d82ece3177dc7d6147945cfb502d3ce355c42c98368f003bf089aebb110ee7119f62d6402a2187d58f44f297a") ; 20801768
+  (defconst SIG58  "19d1a6c9bf554b87d004b73acccad64cc0b4370735b609369f92a9a53e8a07870651464a0b393ef8c607ff05eab5dd7b870ff5dfafda7140e0e2ed10387d3160") ; 20802058
+  (defconst SIG59  "090610f4d8155e4d56b23988d4f0a0451e42a3cc2c296cf4bc98f5f3bbfed1a811d2467d48083eabef7f856e0e9198166abc9a67de356bee250adf30d4a3c5c7") ; 20802059
+  (defconst SIG172 "1f5b04f99e8ed51bbe06ffd960a7e6e421465bd5e0e873aade49e236a3131f06000addb82c5de70f69d0305dbb2a99d88da2d527bdd7ce9fd307263727445361") ; 20802172
+  ;; round 1's seed (beacon 20801767 under the round key "slots|1"), measured
+  (defconst SEED1:integer 41473200179623307258957694415769443739304335489542769187234381733079227613887)
+
+  ;; Move the pot straight out, from a FOREIGN module. Nothing is composed or
+  ;; forged: the transfer is attempted and coin enforces the pot's guard.
+  (defun drain:string (to:string amount:decimal)
+    (install-capability (coin.TRANSFER (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) to amount))
+    (coin.transfer (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) to amount))
+
+  ;; The units of an account's first k spins on the classic machine (id 0) under
+  ;; one seed, for k = 1..n.
+  (defun units-by-count:[integer] (seed:integer account:string n:integer)
+    (map (lambda (k:integer) (at 'units (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-board seed account 0 k 1.0))) (enumerate 1 n)))
+  ;; true when the k-spin board's stops are the first 3k stops of the n-spin board
+  (defun prefix-ok:bool (seed:integer account:string k:integer n:integer)
+    (= (at 'stops (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-board seed account 0 k 1.0))
+       (take (* 3 k) (at 'stops (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-board seed account 0 n 1.0)))))
+  ;; true when, for every spin count 1..20, the classic units won never exceed 40 per spin
+  (defun bounded:bool (seed:integer account:string)
+    (let ((us (units-by-count seed account 20)))
+      (fold (lambda (ok:bool k:integer) (and ok (<= (at (- k 1) us) (* 40 k)))) true (enumerate 1 20))))
+)
+;; A snapshot store, so every "nothing moved" assertion can be its own top-level
+;; form: several `expect`s inside one `let` print a SINGLE trace line carrying the
+;; last label, and a suite written that way cannot show a NAMED assertion ran.
+(module snap SG (defcap SG () (enforce true "ok"))
+  (defschema s v:string)
+  (deftable t:{s})
+  (defun fmt:string (x) (format "{}" [x]))
+  (defun keep:string (k:string x) (write t k { "v": (fmt x) }))
+  (defun got:string (k:string) (at 'v (read t k)))
+  ;; the same, for numbers that are measured as a before/after difference
+  (defschema d n:decimal)
+  (deftable td:{d})
+  (defun keepd:string (k:string x:decimal) (write td k { "n": x }))
+  (defun gotd:decimal (k:string) (at 'n (read td k))))
+(create-table snap.t)
+(create-table snap.td)
+
+;; The A-8 probe board, computed from the live round so it cannot pass for the
+;; wrong reason: sized so the FROZEN share refuses it and a DOUBLED share would
+;; not -- aimed at the midpoint of the two caps. A board of total T adds 40 T of
+;; exposure plus a fee of at most the edge (under 0.05) times T.
+(module probe PG (defcap PG () (enforce true "ok"))
+  (defun room:decimal (seq:integer)
+    (let* ((r  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round seq))
+           (a0 (at 'avail-at-open r))
+           (av (at 'available (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status))))
+      (if (< av a0) av a0)))
+  (defun used:decimal (seq:integer)
+    (let ((r (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round seq)))
+      (+ (at 'exposure r) (at 'fee-owed r))))
+  (defun stake:decimal (seq:integer)
+    (floor (/ (- (* 0.03 (room seq)) (used seq)) 40.05) 12)))
+(commit-tx)
+
+;; ============================================================================
+;; A-7  A STRANGER CANNOT BLOCK DEPLOYMENT BY SQUATTING THE POT'S ACCOUNT
+;;   HOUSE_ACCOUNT is a principal over this module's MODULE GUARD, and a module
+;;   guard is a module name and a label -- so the account name can be built from
+;;   TRANSACTION DATA ALONE, on a chain where the module was never deployed.
+;;   initialize must therefore tolerate a pre-existing row, or it would abort
+;;   forever on that chain. Tolerating it is safe only because coin refuses that
+;;   name to any other guard, which this pins.
+;; ============================================================================
+(env-data { "potg": { "moduleName": { "namespace": "n_48867b242317a0216a67f8c7ca26696b5878e0e3", "name": "slots" }
+                    , "name": "slots-pot" }
+           , "mine": { "keys": ["ca40100000000000000000000000000000000000000000000000000000000003"], "pred": "keys-all" } })
+(begin-tx)
+(expect "A-7 the pot principal is derivable from tx data by anyone"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account)
+  (create-principal (read-msg "potg")))
+(expect-failure "A-7a but nobody can take that name under their OWN guard"
+  "Reserved protocol guard violation"
+  (coin.create-account (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) (read-keyset "mine")))
+(expect "A-7b a stranger squats it under the module's own guard" "Write succeeded"
+  (coin.create-account (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) (read-msg "potg")))
+(commit-tx)
+
+;; ---- set the table up so there is something worth stealing --------------------
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(expect "A-7c and initialize STILL succeeds over the squatted row" "slots initialized"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.initialize n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT 100000.0))
+(commit-tx)
+(env-sigs [{"key":"h0u5e00000000000000000000000000000000000000000000000000000000004"
+           ,"caps":[(coin.TRANSFER "house-funder" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 50000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.fund-house "house-funder" 50000.0)
+(commit-tx)
+(env-sigs [])
+
+;; ============================================================================
+;; A-1  THE POT IS NOT DRAINABLE BY A FOREIGN MODULE
+;;   coin enforces the pot's module guard inside DEBIT; the caller's stack does
+;;   not contain slots, so the guard falls through to module admin -- the
+;;   spt-gov keyset. An unsigned stranger fails there. No capability is in the
+;;   path at all, which is the point of the guard choice.
+;; ============================================================================
+(begin-tx)
+(expect "A-1 PRECONDITION the pot really is funded" 50000.0
+  (at 'balance (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status)))
+;; The refusal is the ENGINE's keyset failure, not a message this module
+;; writes, so no module-unique string exists here; A-1c proves it in state.
+(expect-failure "A-1a a foreign module cannot transfer the pot out"
+  "Keyset failure (keys-all)"
+  (atk.drain atk.MALLORY 50000.0))
+(expect-failure "A-1b nor take a single unit of it" "Keyset failure (keys-all)"
+  (atk.drain atk.MALLORY 0.000000000001))
+(expect "A-1c the pot is untouched" 50000.0
+  (at 'balance (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status)))
+(commit-tx)
+
+;; ---------------------------------------------------------------------------
+;; A-1d  THE SAME TRANSFER, WITH MODULE ADMIN, SUCCEEDS -- AND THAT IS CUSTODY
+;;   The open direction of A-1: the refusal above is the guard, not an attack
+;;   that could never work. Until the freeze the admin keyset is module
+;;   governance and satisfies the pot's guard from anywhere. Rolled back.
+;; ---------------------------------------------------------------------------
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(acquire-module-admin n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots)
+(expect "A-1d PRECONDITION the caller holds her starting 100,000" 100000.0
+  (coin.get-balance atk.MALLORY))
+(expect "A-1d1 with module admin the SAME drain moves the whole pot" "Write succeeded"
+  (atk.drain atk.MALLORY 50000.0))
+(expect "A-1d2 and the pot is empty" 0.0
+  (coin.get-balance (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account)))
+(expect "A-1d3 and the caller took all of it" 150000.0
+  (coin.get-balance atk.MALLORY))
+(rollback-tx)
+(env-sigs [])
+(begin-tx)
+(expect "A-1d4 the rollback left the pot where it was" 50000.0
+  (at 'balance (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status)))
+(commit-tx)
+
+;; ============================================================================
+;; A-2  THERE IS NO INTERNAL ROUND MACHINERY TO REACH
+;;   The round opener is INLINED in `bet`: a round opens only when a board
+;;   arrives, and the module defines no export a forger could name. The source
+;;   is read here, with a control showing the same read sees what does exist.
+;; ============================================================================
+(begin-tx)
+(expect "A-2 the module defines no open-round export" false
+  (contains "(defun open-round" (at 'code (describe-module "n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots"))))
+(expect "A-2a CONTROL the same read does see the exports that exist" true
+  (contains "(defun bet:string" (at 'code (describe-module "n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots"))))
+(expect "A-2b no round exists before the first board" 0
+  (at 'current (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params)))
+(commit-tx)
+
+;; ============================================================================
+;; A-3  WHAT *IS* PERMISSIONLESS STAYS SAFE
+;;   resolve and claim are open to anyone. Being open buys the caller nothing:
+;;   the seed comes from the beacon and the round key, the stops from the seed
+;;   and the board's account, and a claim always pays the board's own account.
+;; ============================================================================
+(env-chain-data { "block-time": (time "2026-09-20T17:43:43Z") })
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER atk.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 1000.0)]}])
+(begin-tx)
+(expect "A-3 PRECONDITION alice's 20-spin board opens round 1" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet atk.ALICE { "entries": [ { "machine": 0, "stake": 0.1, "spins": 20 } ] }))
+(commit-tx)
+;; bob bets at the round's close-time EXACTLY: the last second a bet may join
+(env-chain-data { "block-time": (time "2026-09-20T17:44:13Z") })
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER atk.BOBBY (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 1000.0)]}])
+(begin-tx)
+(expect "A-3 PRECONDITION round 1 closes at 17:44:13" (time "2026-09-20T17:44:13Z")
+  (at 'close-time (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)))
+(expect "A-12 CONTROL a bet AT the close-time still joins round 1" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet atk.BOBBY { "entries": [ { "machine": 0, "stake": 1.0, "spins": 1 } ] }))
+(commit-tx)
+(env-sigs [])
+
+;; ============================================================================
+;; A-12  A BET PLACED AFTER BETTING CLOSED CANNOT JOIN THE CLOSED ROUND
+;;   Round 1 closes at 17:44:13 and its beacon is published at 17:46:13. A bet one
+;;   second after the close, or one placed once the beacon (and so every stop) is
+;;   public, opens round 2 on a LATER beacon and leaves round 1's exposure,
+;;   stake and board count exactly where they were. Both rolled back.
+;; ============================================================================
+(begin-tx)
+(expect "A-12 PRECONDITION round 1 holds both boards: exposure 40 x (2.0 + 1.0)" 120.0
+  (at 'exposure (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)))
+(commit-tx)
+(env-chain-data { "block-time": (time "2026-09-20T17:44:14Z") })
+(env-sigs [{"key":"ca40100000000000000000000000000000000000000000000000000000000003"
+           ,"caps":[(coin.TRANSFER atk.MALLORY (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 1000.0)]}])
+(begin-tx)
+(expect "A-12a one second after the close a bet opens round 2" "bet placed in round 2"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet atk.MALLORY { "entries": [ { "machine": 0, "stake": 1.0, "spins": 20 } ] }))
+(expect "A-12b round 1's exposure is unchanged" 120.0 (at 'exposure (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)))
+(expect "A-12c round 1's stake is unchanged" 3.0 (at 'stake (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)))
+(expect "A-12d round 1 still holds two boards" 2 (at 'boards (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)))
+;; 17:44:14 + 30 + 120 = 17:46:44; the latest beacon published by then is
+;; 20801777 (17:46:43Z = genesis + 3 x 20801776)
+(expect "A-12e the late board sits in round 2, on a later beacon" 20801777
+  (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 2)))
+(rollback-tx)
+(env-chain-data { "block-time": (time "2026-09-20T17:47:00Z") })
+(begin-tx)
+(expect "A-12f with round 1's beacon already public a bet opens round 2" "bet placed in round 2"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet atk.MALLORY { "entries": [ { "machine": 0, "stake": 1.0, "spins": 20 } ] }))
+(expect "A-12g round 1's exposure is unchanged" 120.0 (at 'exposure (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)))
+(expect "A-12h round 1 still holds two boards" 2 (at 'boards (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)))
+(expect "A-12i and the late board's round pins a beacon not yet published" true
+  (> (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 2)) 20801767))
+(rollback-tx)
+(env-sigs [])
+
+(env-chain-data { "block-time": (time "2026-09-20T17:47:00Z") })
+(begin-tx)
+(expect "A-3 PRECONDITION round 1 pins the beacon the bet time names" 20801767
+  (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)))
+;; mallory resolves the round: permissionless, and she gains nothing by it
+(expect "A-3a anyone may resolve, and the seed is not theirs to choose"
+  41473200179623307258957694415769443739304335489542769187234381733079227613887
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.resolve 1 "0d745db068db9e16379a49f65d76353d721d79fb459d20b33a50e750e5cdb10400af36e03d4a8414b3a86770d1d1e90e85462dce40b3cf5c27f9fdb477b6f6e0"))
+(expect "A-3b the round recorded exactly that seed"
+  41473200179623307258957694415769443739304335489542769187234381733079227613887
+  (at 'seed (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)))
+(commit-tx)
+
+(begin-tx)
+(expect "A-3c PRECONDITION mallory holds her starting 100,000" 100000.0
+  (coin.get-balance atk.MALLORY))
+;; mallory cranks alice's claim. It pays ALICE.
+(expect "A-3c1 mallory cranks alice's claim: it pays the board's 9 units at 0.1" "paid 0.900000000000"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 1 atk.ALICE))
+(expect "A-3c2 cranking someone else's claim pays THEM, not the caller" 100000.0
+  (coin.get-balance atk.MALLORY))
+(expect "A-3d alice was paid her win: 100,000 - 2.0 + 0.9" 99998.9
+  (coin.get-balance atk.ALICE))
+(expect "A-3d1 and her reels are the ones the seed spun"
+  [47 20 0 25 12 60 4 33 52 1 7 13 6 6 46 14 54 3 26 51 39 40 27 52 1 33 51 7 18 48 18 58 6 47 30 41 7 55 59 8 55 1 38 15 52 62 43 16 32 31 51 16 40 43 23 5 10 28 57 23]
+  (at 'stops (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 atk.ALICE)))
+(expect-failure "A-3e and mallory cannot claim a board she never placed" "No value found"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 1 atk.MALLORY))
+(commit-tx)
+(begin-tx)
+(expect "A-3f mallory cranks bob's board too: two cherries pay 5 x 1.0 to BOB" "paid 5.000000000000"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 1 atk.BOBBY))
+(expect "A-3g mallory still holds exactly her 100,000" 100000.0
+  (coin.get-balance atk.MALLORY))
+(expect "A-3h bob holds 100,000 - 1.0 + 5.0" 100004.0
+  (coin.get-balance atk.BOBBY))
+(commit-tx)
+
+;; ============================================================================
+;; A-4  SIGNATURE MALLEABILITY -- refused end to end
+;;   A 32-byte coordinate holds values to 2^256-1 while the field modulus is
+;;   ~2^254, and the pairing native reduces mod P, so x, x+P, x+2P are the SAME
+;;   point and all would verify. A seed built from the raw integers would let a
+;;   resolver pick among several seeds -- several sets of reels -- after betting.
+;;   The verifier refuses every non-canonical encoding; the genuine one still
+;;   resolves. Round 2 pins the SAME beacon as round 1 on purpose: SO-5 shows
+;;   why that beacon cannot reproduce round 1's seed.
+;; ============================================================================
+(begin-tx)
+(module mall MG (defcap MG () (enforce true "ok"))
+  (defconst P:integer 21888242871839275222246405745257275088696311157297823662689037894645226208583)
+  (defconst SIG "0d745db068db9e16379a49f65d76353d721d79fb459d20b33a50e750e5cdb10400af36e03d4a8414b3a86770d1d1e90e85462dce40b3cf5c27f9fdb477b6f6e0")
+  (defconst X:integer (str-to-int 16 (take 64 SIG)))
+  (defconst Y:integer (str-to-int 16 (drop 64 SIG)))
+  (defun hex64:string (v:integer)
+    (let ((h (int-to-str 16 v)))
+      (+ (take (- 64 (length h)) "0000000000000000000000000000000000000000000000000000000000000000") h)))
+  (defun enc:string (kx:integer ky:integer) (+ (hex64 (+ X (* kx P))) (hex64 (+ Y (* ky P))))))
+(commit-tx)
+
+(env-chain-data { "block-time": (time "2026-09-20T17:43:43Z") })
+(env-sigs [{"key":"ca40100000000000000000000000000000000000000000000000000000000003"
+           ,"caps":[(coin.TRANSFER atk.MALLORY (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 100.0)]}])
+(begin-tx)
+(expect "A-4 PRECONDITION mallory's one-spin board opens round 2" "bet placed in round 2"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet atk.MALLORY { "entries": [ { "machine": 0, "stake": 1.0, "spins": 1 } ] }))
+(commit-tx)
+(env-sigs [])
+(env-chain-data { "block-time": (time "2026-09-20T17:47:00Z") })
+(begin-tx)
+(expect "A-4 PRECONDITION round 2 pins the same beacon as round 1" 20801767
+  (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 2)))
+(expect-failure "A-4a a re-encoded beacon (x+P) cannot be used to pick the reels"
+  "G1 coordinates must be canonical" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.resolve 2 (mall.enc 1 0)))
+(expect-failure "A-4b nor (y+P)"
+  "G1 coordinates must be canonical" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.resolve 2 (mall.enc 0 1)))
+(expect-failure "A-4c nor both shifted"
+  "G1 coordinates must be canonical" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.resolve 2 (mall.enc 2 3)))
+(expect-failure "A-4d nor the largest reachable shift"
+  "G1 coordinates must be canonical" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.resolve 2 (mall.enc 4 4)))
+(expect-failure "A-4d1 and a forged signature does not verify at all"
+  "drand signature does not verify" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.resolve 2 atk.SIG68))
+(expect "A-4e the refusals left round 2 open" "open" (at 'state (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 2)))
+(commit-tx)
+(begin-tx)
+;; CONTROL: the genuine encoding of the same beacon still settles the round, so
+;; the refusals above are about canonicality and not a broken fixture.
+(expect "A-4f CONTROL the canonical beacon still resolves, to round 2's own seed"
+  1102156400428888335836943362866460187093736783002565895545831486238212128704
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.resolve 2 mall.SIG))
+(commit-tx)
+(begin-tx)
+(expect-failure "A-4g and a settled round cannot be resolved again"
+  "this round is already settled" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.resolve 2 mall.SIG))
+(rollback-tx)
+
+
+;; ============================================================================
+;; A-10  A LOSING BOARD SETTLES, AND RELEASES EXACTLY WHAT IT RESERVED
+;;   Mallory's one spin in round 2 stops on [62 48 30] -- blank, blank, blank
+;;   (Python oracle) -- and pays nothing. Her claim must still succeed: it is how
+;;   the pot gets back the 40 x 1.0 the board has held since it was placed.
+;;   Measured before and after, in `reserved` and in the round's own liability;
+;;   no coin moves.
+;; ============================================================================
+(begin-tx)
+(snap.keepd "reserved" (at 'reserved (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params)))
+(snap.keepd "liability" (at 'liability (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 2)))
+(snap.keepd "pot" (coin.get-balance (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account)))
+(commit-tx)
+(begin-tx)
+(expect "A-10 PRECONDITION the resolved round's liability is the board's 40 x 1.0" 40.0
+  (snap.gotd "liability"))
+(expect "A-10a a losing board's claim succeeds and says it won nothing"
+  "settled: nothing to claim, this board did not win"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 2 atk.MALLORY))
+(expect "A-10b it released exactly 40 x 1.0 from reserved" 40.0
+  (- (snap.gotd "reserved") (at 'reserved (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params))))
+(expect "A-10c and exactly 40 x 1.0 from the round's liability" 40.0
+  (- (snap.gotd "liability") (at 'liability (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 2))))
+(expect "A-10d which leaves the fully settled round owing nothing" 0.0
+  (at 'liability (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 2)))
+(expect "A-10e the round counts it settled" 1 (at 'settled (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 2)))
+(expect "A-10f and not one KDA left the pot" 0.0
+  (- (snap.gotd "pot") (coin.get-balance (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account))))
+(expect "A-10g the board records its reels and its zero payout"
+  { "stops": [62 48 30], "payout": 0.0, "claimed": true }
+  (let ((b (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 2 atk.MALLORY)))
+    { "stops": (at 'stops b), "payout": (at 'payout b), "claimed": (at 'claimed b) }))
+(commit-tx)
+(begin-tx)
+(expect-failure "A-10h a second claim on the settled loser is refused"
+  "this board has already been claimed"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 2 atk.MALLORY))
+(rollback-tx)
+(begin-tx)
+(expect "A-10i CONTROL the refusal released nothing twice" 0.0
+  (at 'liability (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 2)))
+(commit-tx)
+
+;; ============================================================================
+;; SO-5  THE SEED BINDS THE ROUND
+;;   Rounds 1 and 2 were resolved from the SAME genuine beacon. The seed is
+;;   domain-separated by the round key, so a beacon reused on another round
+;;   spins different reels: a resolver cannot carry a known result across rounds.
+;; ============================================================================
+(begin-tx)
+(expect "SO-5 the same beacon gives round 1 and round 2 different seeds" false
+  (= (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verified-seed "slots|1" 20801767 mall.SIG)
+     (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verified-seed "slots|2" 20801767 mall.SIG)))
+(expect "SO-5a CONTROL the same round key and beacon give the same seed twice" true
+  (= (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verified-seed "slots|1" 20801767 mall.SIG)
+     (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verified-seed "slots|1" 20801767 mall.SIG)))
+(expect "SO-5a1 and that seed is round 1's recorded one" atk.SEED1
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verified-seed "slots|1" 20801767 mall.SIG))
+(commit-tx)
+
+;; ============================================================================
+;; SO-5b  THE SEED IS PER ACCOUNT TOO
+;;   Under ONE seed two accounts' first spins stop differently (alice [47 20 0],
+;;   bob [43 5 45], the measured round-1 reels), and one account's first spin
+;;   differs between two rounds (alice under round 2's seed: [21 36 56], Python
+;;   oracle). Nobody can copy a winning board's reels by joining its round.
+;; ============================================================================
+(begin-tx)
+(expect "SO-5b alice's first spin under round 1's seed" [47 20 0]
+  (at 'stops (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-board atk.SEED1 atk.ALICE 0 1 1.0)))
+(expect "SO-5c bob's first spin under the SAME seed" [43 5 45]
+  (at 'stops (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-board atk.SEED1 atk.BOBBY 0 1 1.0)))
+(expect "SO-5d so two accounts in one round stop differently" false
+  (= (at 'stops (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-board atk.SEED1 atk.ALICE 0 1 1.0))
+     (at 'stops (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-board atk.SEED1 atk.BOBBY 0 1 1.0))))
+(expect "SO-5e alice's first spin under round 2's seed" [21 36 56]
+  (at 'stops (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-board (at 'seed (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 2)) atk.ALICE 0 1 1.0)))
+(expect "SO-5f so one account in two rounds stops differently" false
+  (= (at 'stops (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-board atk.SEED1 atk.ALICE 0 1 1.0))
+     (at 'stops (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-board (at 'seed (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 2)) atk.ALICE 0 1 1.0))))
+(commit-tx)
+
+;; ============================================================================
+;; SO-6  THE SPIN HELPERS ARE PURE AND OPEN TO ANYONE
+;;   play-board, board-seed, spin-stops, spin-units and line-pay are public
+;;   exports (Pact has no private). Called here with no signature and no
+;;   capability, they compute and return; none of them reads or writes a table
+;;   or moves a coin. SO-6a is also what lets anyone check a board: alice's round-1
+;;   board recomputed from its seed, stop for stop.
+;; ============================================================================
+(begin-tx)
+(snap.keep "pot" (coin.get-balance (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account)))
+(snap.keep "game" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params))
+(snap.keep "r1" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1))
+(commit-tx)
+(begin-tx)
+(expect "SO-6 play-board recomputes alice's round-1 board: 9 units, 0.9 at 0.1"
+  { "units": 9, "payout": 0.9 }
+  (let ((p (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-board atk.SEED1 atk.ALICE 0 20 0.1)))
+    { "units": (at 'units p), "payout": (at 'payout p) }))
+(expect "SO-6a stop for stop what the claim recorded"
+  (at 'stops (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 atk.ALICE))
+  (at 'stops (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-board atk.SEED1 atk.ALICE 0 20 0.1)))
+(expect "SO-6b spin-stops over the board seed gives the first spin" [47 20 0]
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.spin-stops (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.board-seed atk.SEED1 atk.ALICE) 1))
+(expect "SO-6c spin-units scores bob's first classic spin, bell-cherry-cherry, at 5" 5
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.spin-units 0
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.spin-key (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.board-seed atk.SEED1 atk.BOBBY) 1)))
+;; the classic paytable handed in as a literal: seven bar bell cherry x3, any
+;; high, two cherries, one cherry
+(expect "SO-6d line-pay: three sevens pay 40 on the classic table" 40
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay [40 20 10 15 5 5 2 0] 4 4 4))
+(expect "SO-6e line-pay: a blank line pays 0" 0
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay [40 20 10 15 5 5 2 0] 0 0 0))
+(expect "SO-6f the pot did not move" (snap.got "pot") (snap.fmt (coin.get-balance (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account))))
+(expect "SO-6g the game row did not move" (snap.got "game") (snap.fmt (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params)))
+(expect "SO-6h round 1's row did not move" (snap.got "r1") (snap.fmt (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)))
+(commit-tx)
+
+;; ============================================================================
+;; A-9  THE SPIN COUNT CANNOT PICK AN OUTCOME
+;;   A board's spins are a PREFIX-STABLE sequence: spin i depends on the seed,
+;;   the account and i alone, so buying more spins appends spins and never
+;;   re-rolls the earlier ones. Even a player who knew the seed could only choose
+;;   WHERE to stop reading one fixed sequence -- and the seed does not exist while
+;;   a bet can be placed (A-12). Alice's units under round 1's seed for 1..20
+;;   spins at stake 1.0 (Python oracle): the running sum of one fixed sequence.
+;; ============================================================================
+(begin-tx)
+(expect "A-9 alice's units for 1, 2, ... 20 spins are one running sum"
+  [0 0 0 2 2 2 2 2 7 7 7 7 7 7 7 7 7 7 9 9]
+  (atk.units-by-count atk.SEED1 atk.ALICE 20))
+(expect "A-9a the 1-spin board is the first spin of the 20-spin board" true
+  (atk.prefix-ok atk.SEED1 atk.ALICE 1 20))
+(expect "A-9b the 5-spin board is the first five spins of the 20-spin board" true
+  (atk.prefix-ok atk.SEED1 atk.ALICE 5 20))
+(expect "A-9c the 20-spin board is itself" true
+  (atk.prefix-ok atk.SEED1 atk.ALICE 20 20))
+(expect "A-9d the 5-spin board's stops, literally (Python oracle)"
+  [47 20 0 25 12 60 4 33 52 1 7 13 6 6 46]
+  (at 'stops (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-board atk.SEED1 atk.ALICE 0 5 1.0)))
+(expect "A-9e bob's running sum likewise (Python oracle)"
+  [5 5 7 7 7 9 9 9 9 11 11 11 13 13 18 18 18 18 18 18]
+  (atk.units-by-count atk.SEED1 atk.BOBBY 20))
+;; CONTROL: the prefix check is not vacuous -- a different account's board is
+;; not a prefix of alice's
+(expect "A-9f CONTROL bob's 5-spin stops are NOT alice's first five" false
+  (= (at 'stops (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-board atk.SEED1 atk.BOBBY 0 5 1.0))
+     (take 15 (at 'stops (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-board atk.SEED1 atk.ALICE 0 20 1.0)))))
+(commit-tx)
+
+;; ============================================================================
+;; A-11  NO BOARD CAN BE PAID MORE THAN IT RESERVED
+;;   A classic board reserves 40 x its total. For round 1's seed, every account
+;;   in this file, every spin count 1..20: units <= 40 x spins. And the table
+;;   itself: no triple of the 216 (six symbol codes) pays more than 40 on the
+;;   classic machine, and 40 is reached (three sevens), so the reserve is the
+;;   table's true maximum and not a guess. A-15 extends the bound to every
+;;   machine through the spin cap.
+;; ============================================================================
+(begin-tx)
+(expect "A-11 alice: every spin count's units stay within 40 per spin" true
+  (atk.bounded atk.SEED1 atk.ALICE))
+(expect "A-11a bob likewise" true (atk.bounded atk.SEED1 atk.BOBBY))
+(expect "A-11b mallory likewise" true (atk.bounded atk.SEED1 atk.MALLORY))
+(expect "A-11c alice's actual board: 0.9 paid against 80.0 reserved" true
+  (<= (at 'payout (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 atk.ALICE)) (* 40.0 (at 'total (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 atk.ALICE)))))
+(expect "A-11d bob's actual board: 5.0 paid against 40.0 reserved" true
+  (<= (at 'payout (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 atk.BOBBY)) (* 40.0 (at 'total (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 atk.BOBBY)))))
+(expect "A-11e the table has 216 ordered triples" 216 (length n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.TRIPLES))
+(expect "A-11f no triple pays more than 40" true
+  (fold (lambda (ok:bool t:[integer]) (and ok (<= (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.triple-units (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.machine-at 0) t) 40))) true n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.TRIPLES))
+(expect "A-11g the largest triple pay is exactly 40" 40
+  (fold (lambda (m:integer t:[integer]) (if (> (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.triple-units (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.machine-at 0) t) m) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.triple-units (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.machine-at 0) t) m)) 0 n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.TRIPLES))
+(expect "A-11h and the classic entry of MAX-MULTS, which its reserve multiplies by, is 40" 40.0 (at 0 n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.MAX-MULTS))
+;; CONTROL: the bound check can fail -- against 39 per spin, three sevens break it
+(expect "A-11i CONTROL against 39, the fold does find a triple over the bound" false
+  (fold (lambda (ok:bool t:[integer]) (and ok (<= (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.triple-units (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.machine-at 0) t) 39))) true n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.TRIPLES))
+(commit-tx)
+
+;; ============================================================================
+;; A-5  A LOSER CANNOT WAIT OUT THE CLOCK
+;;   drand is public: a player can compute the outcome off-chain the moment the
+;;   beacon exists. If a refund needed only elapsed time, every loser would
+;;   decline to resolve and void after the grace. The refund therefore needs
+;;   on-chain EVIDENCE that drand went away.
+;;   Shape: round X pins 20801767, a LATER round Y pins 20802058. Slots has no
+;;   round order, so Y may be resolved first -- and that alone is the evidence:
+;;   the record passes X's beacon, and X then can never be refunded.
+;; ============================================================================
+(env-chain-data { "block-time": (time "2026-09-20T17:43:43Z") })
+(env-sigs [{"key":"ca40100000000000000000000000000000000000000000000000000000000003"
+           ,"caps":[(coin.TRANSFER atk.MALLORY (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 100.0)]}])
+(begin-tx)
+(expect "A-5 PRECONDITION mallory opens round X = 3" "bet placed in round 3"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet atk.MALLORY { "entries": [ { "machine": 0, "stake": 1.0, "spins": 1 } ] }))
+(commit-tx)
+(env-chain-data { "block-time": (time "2026-09-20T17:58:16Z") })
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER atk.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 100.0)]}])
+(begin-tx)
+(expect "A-5 PRECONDITION alice opens round Y = 4" "bet placed in round 4"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet atk.ALICE { "entries": [ { "machine": 0, "stake": 1.0, "spins": 1 } ] }))
+(commit-tx)
+(env-sigs [])
+
+(begin-tx)
+(expect "A-5 round X pins the earlier beacon" 20801767 (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 3)))
+(expect "A-5a round Y pins a LATER one" 20802058 (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 4)))
+(expect "A-5a1 both owe the revenue account a fee, so both resolves install a transfer" true
+  (and (> (at 'fee-owed (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 3)) 0.0) (> (at 'fee-owed (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 4)) 0.0)))
+(commit-tx)
+(begin-tx)
+(expect-failure "A-5a2 an open round's board cannot be claimed"
+  "this round has not been settled yet"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 3 atk.MALLORY))
+(rollback-tx)
+
+;; ---------------------------------------------------------------------------
+;; A-6  ONE RESOLVE PER TRANSACTION -- an operational constraint, pinned so a
+;;   crank author meets it here and not in production. Every resolve installs
+;;   coin.TRANSFER from the pot to the SAME revenue account, and Pact 5's
+;;   duplicate-install identity excludes the amount, so the second install in one
+;;   transaction collides.
+;; ---------------------------------------------------------------------------
+(env-chain-data { "block-time": (time "2026-09-20T18:01:00Z") })
+(begin-tx)
+;; observed: Capability already installed: (coin.TRANSFER "m:...slots:slots-pot"
+;; "m:...spt-stub:SPT-funding" <round 4's fee>)
+(expect-failure "A-6 two rounds cannot be resolved in one transaction"
+  "Capability already installed: (coin.TRANSFER \"m:n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots:slots-pot\""
+  [ (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.resolve 3 mall.SIG)
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.resolve 4 atk.SIG58) ])
+;; rollback-tx: X resolved before Y's install collided, and a REPL
+;; expect-failure leaks those writes through a commit.
+(rollback-tx)
+(begin-tx)
+(expect "A-6a the failed batch left round X open" "open" (at 'state (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 3)))
+(expect "A-6b and round Y open" "open" (at 'state (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 4)))
+(commit-tx)
+
+;; ---- ninety days on: nobody has resolved anything -----------------------------
+(env-chain-data { "block-time": (time "2027-01-05T00:00:00Z") })
+
+;; ---- the evidence: Y resolved first, which slots permits --------------------
+(begin-tx)
+(expect "A-5b Y resolves first, from its own beacon, to its own seed"
+  30534645797586898399525116384211839053717109175432314897475472163715259706596
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.resolve 4 atk.SIG58))
+(expect "A-5b1 and the record rises to Y's beacon, past X's" 20802058
+  (at 'last-beacon (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params)))
+(expect "A-5b2 X is untouched by it" "open" (at 'state (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 3)))
+(commit-tx)
+
+(begin-tx)
+(expect "A-5c0 CONTROL the grace has genuinely elapsed for X, so time is not what refuses it" true
+  (> (diff-time (at 'block-time (chain-data))
+                (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.time-of-round (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 3))))
+     7776000.0))
+(expect-failure "A-5c waiting out the grace does NOT buy X a refund"
+  "drand has been seen since this round"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.void-round 3))
+(rollback-tx)
+(begin-tx)
+(expect-failure "A-5c1 nor can the resolved Y be refunded"
+  "this round is not open"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.void-round 4))
+(rollback-tx)
+
+(begin-tx)
+(expect "A-5d round X is still open, and still resolvable" "open" (at 'state (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 3)))
+;; it settles from its OWN beacon months late with the same seed it always had
+(expect "A-5e X resolves from its own genuine beacon, months late"
+  12041148835183800475006871467295018872219432098852289268313692304756190715744
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.resolve 3 mall.SIG))
+;; stops [15 28 13] = blank blank cherry (Python oracle): one cherry pays 2
+(expect "A-5f and mallory's board is paid exactly what its reels show" "paid 2.000000000000"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 3 atk.MALLORY))
+(expect "A-5f1 alice's Y board, [11 16 59] = bell blank bell, did not win"
+  "settled: nothing to claim, this board did not win"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 4 atk.ALICE))
+(commit-tx)
+
+;; ============================================================================
+;; A-5g  THE RECORD IS A HIGH-WATER MARK, NOT THE LAST BEACON SEEN
+;;   X was settled from a beacon OLDER than the record. `resolve` writes
+;;   max(beacon, record); writing the beacon itself would walk the record
+;;   BACKWARDS and make every pending round between the two refundable.
+;; ============================================================================
+(begin-tx)
+(expect "A-5g settling an OLDER round does not walk the record backwards" 20802058
+  (at 'last-beacon (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params)))
+(commit-tx)
+
+;; Two pending rounds, straddling the record: W's beacon BELOW it, Z's one round
+;; ABOVE. Both open from a chain time in their beacon's own window, so the grace
+;; below is genuinely elapsed for each.
+(env-chain-data { "block-time": (time "2026-09-20T17:43:46Z") })
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER atk.BOBBY (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 100.0)]}])
+(begin-tx)
+(expect "A-5h0 bob opens round W = 5" "bet placed in round 5"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet atk.BOBBY { "entries": [ { "machine": 0, "stake": 1.0, "spins": 1 } ] }))
+(commit-tx)
+(env-chain-data { "block-time": (time "2026-09-20T17:58:19Z") })
+(env-sigs [{"key":"ca40100000000000000000000000000000000000000000000000000000000003"
+           ,"caps":[(coin.TRANSFER atk.MALLORY (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 100.0)]}])
+(begin-tx)
+(expect "A-5h1 mallory opens round Z = 6" "bet placed in round 6"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet atk.MALLORY { "entries": [ { "machine": 0, "stake": 1.0, "spins": 1 } ] }))
+(commit-tx)
+(env-sigs [])
+(begin-tx)
+(expect "A-5h W pins a beacon BELOW the record" 20801768 (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 5)))
+(expect "A-5i Z pins the very next beacon ABOVE the record" 20802059 (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 6)))
+(commit-tx)
+
+(env-chain-data { "block-time": (time "2027-01-05T00:00:00Z") })
+(begin-tx)
+(expect "A-5j1 CONTROL the grace has genuinely elapsed for W, so time is not what refuses it" true
+  (> (diff-time (at 'block-time (chain-data))
+                (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.time-of-round (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 5))))
+     n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.VOID-AFTER))
+(expect-failure "A-5k W's beacon is BELOW the record, so it must be resolved, not refunded"
+  "drand has been seen since this round"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.void-round 5))
+(rollback-tx)
+(begin-tx)
+(expect "A-5k1 W resolves from its own beacon"
+  15495721442697167112922067596115422539328620816742570497332893620273203643428
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.resolve 5 atk.SIG68))
+(expect "A-5k2 and the record did not walk back to W's beacon" 20802058
+  (at 'last-beacon (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params)))
+(commit-tx)
+
+;; ---- A-5j  the OPEN direction: Z, one beacon above the record, refunds --------
+;; Z differs from W in exactly one number, and with everything else identical
+;; the refund succeeds. Rolled back: Z is needed intact below.
+(begin-tx)
+(expect "A-5j CONTROL a round whose beacon is above the record DOES refund"
+  "round void: every stake is refundable"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.void-round 6))
+(expect "A-5j2 and the refund pays mallory her stake back" "paid 1.0"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 6 atk.MALLORY))
+(rollback-tx)
+
+;; ============================================================================
+;; A-5l  THE BOUNDARY: THE RECORD EXACTLY AT THE ROUND'S OWN BEACON
+;;   At equality drand demonstrably published THIS round's beacon, so the round
+;;   is settleable and a refund is the wrong answer; relaxing `<` to `<=` would
+;;   hand a loser their stake back on the one beacon that proves they lost.
+;;   A-5j is the open direction for this: the same call succeeded one below.
+;; ============================================================================
+(begin-tx)
+(expect "A-5l proving Z's OWN beacon puts the record exactly AT it" 20802059
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.prove-liveness 20802059 atk.SIG59))
+(expect "A-5m the record and Z's own beacon are now the same number" true
+  (= (at 'last-beacon (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params)) (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 6))))
+(commit-tx)
+(begin-tx)
+(expect-failure "A-5n at record == beacon the refund is refused"
+  "drand has been seen since this round"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.void-round 6))
+(rollback-tx)
+(begin-tx)
+(expect "A-5o Z resolves from its own beacon"
+  91362048335335196090015529985264100323263652291127897160592197653387525905211
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.resolve 6 atk.SIG59))
+(commit-tx)
+
+;; ============================================================================
+;; A-8  set-params CANNOT WIDEN A ROUND THAT ALREADY HAS BETS IN IT
+;;   The cap is frac x min(avail-at-open, available). Both the fraction and the
+;;   pot at open are frozen on the round, so doubling the dial mid-round widens
+;;   nothing.
+;; ============================================================================
+(env-chain-data { "block-time": (time "2027-01-10T00:00:00Z") })
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER atk.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 100000.0)]}])
+(begin-tx)
+(expect "A-8 PRECONDITION alice opens round 7" "bet placed in round 7"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet atk.ALICE { "entries": [ { "machine": 0, "stake": 1.0, "spins": 10 } ] }))
+(commit-tx)
+(env-sigs [])
+(begin-tx)
+(expect "A-8 the round recorded the fraction in force when it opened" 0.02
+  (at 'frac-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 7)))
+(expect "A-8 PRECONDITION round 7 opened at the launch minimum" 0.01
+  (at 'min-bet-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 7)))
+(commit-tx)
+;; admin doubles the share AND raises the minimum (D-1 below)
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(expect "A-8 PRECONDITION the dials move" "params set"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.set-params 0.04 0.05 100000.0 30.0 120.0))
+(commit-tx)
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER atk.BOBBY (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 100000.0)]}])
+(begin-tx)
+(expect "A-8a the LIVE round still enforces the fraction it opened under" 0.02
+  (at 'frac-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 7)))
+(expect "A-8a1 while the row now holds the doubled one" 0.04
+  (at 'reserve-fraction (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params)))
+(expect "A-8a2 the probe board really is inside the DOUBLED cap" true
+  (< (+ (probe.used 7) (* 40.05 (probe.stake 7))) (* 0.04 (probe.room 7))))
+(expect "A-8a3 and really is outside the FROZEN one" true
+  (> (+ (probe.used 7) (* 40.0 (probe.stake 7))) (* 0.02 (probe.room 7))))
+(expect-failure "A-8b so a board the doubled fraction would allow is still refused"
+  "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet atk.BOBBY { "entries": [ { "machine": 0, "stake": (probe.stake 7), "spins": 1 } ] }))
+(rollback-tx)
+
+;; ============================================================================
+;; D-1  THE OPEN ROUND KEEPS ITS MINIMUM
+;;   The dials above moved the minimum 0.01 -> 0.05 while round 7 was still
+;;   taking bets. A board at 0.02 a spin joining round 7 is judged against 0.01;
+;;   the NEXT round takes 0.05, and the same board is refused there.
+;; ============================================================================
+;; round 7 opened at 00:00:00 and closes at 00:00:30: this is inside its window
+(env-chain-data { "block-time": (time "2027-01-10T00:00:20Z") })
+(begin-tx)
+(expect "D-1 the open round's minimum did not move" 0.01
+  (at 'min-bet-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 7)))
+(expect "D-1a what the table advertises for it is the round's minimum" 0.01
+  (at 'min-bet (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status)))
+(expect "D-1b while the row holds the new one" 0.05 (at 'min-bet (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params)))
+(commit-tx)
+(begin-tx)
+(expect "D-1c a 0.02 board joins round 7 under the round's own minimum" "bet placed in round 7"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet atk.BOBBY { "entries": [ { "machine": 0, "stake": 0.02, "spins": 1 } ] }))
+(commit-tx)
+(env-sigs [])
+
+(env-chain-data { "block-time": (time "2027-01-10T00:05:00Z") })
+(env-sigs [{"key":"ca40100000000000000000000000000000000000000000000000000000000003"
+           ,"caps":[(coin.TRANSFER atk.MALLORY (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 100.0)]}])
+(begin-tx)
+(expect-failure "D-1d the same 0.02 board cannot open the next round under the new minimum"
+  "stake per spin below the table minimum"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet atk.MALLORY { "entries": [ { "machine": 0, "stake": 0.02, "spins": 1 } ] }))
+(rollback-tx)
+(begin-tx)
+(expect "D-1e CONTROL a board at the new minimum opens round 8" "bet placed in round 8"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet atk.MALLORY { "entries": [ { "machine": 0, "stake": 0.05, "spins": 1 } ] }))
+(commit-tx)
+(env-sigs [])
+(begin-tx)
+(expect "D-1f the NEXT round opened is round 8" 8 (at 'current (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params)))
+(expect "D-1g and takes the new minimum" 0.05 (at 'min-bet-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 8)))
+(expect "D-1h and the new share" 0.04 (at 'frac-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 8)))
+(commit-tx)
+
+;; ============================================================================
+;; D-2  NOBODY CAN HAND IN A ROUND OR A MULTIPLIER
+;;   The only way a round opens is a board, and a board carries entries of a
+;;   machine, a stake and a spin count: a board that tries to hand in a round
+;;   number, an entry that tries to hand in a payout, or an entry that leaves out
+;;   its machine, is refused by the engine before a line of the module runs, and
+;;   opens nothing (A-20 holds the controls: the corrected board is accepted).
+;;   (The wording is the engine's; the label identifies the test.)
+;; ============================================================================
+(env-chain-data { "block-time": (time "2027-01-10T00:10:00Z") })
+(env-sigs [{"key":"ca40100000000000000000000000000000000000000000000000000000000003"
+           ,"caps":[(coin.TRANSFER atk.MALLORY (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 100.0)]}])
+(begin-tx)
+(expect "D-2 PRECONDITION round 8 is the last opened" 8 (at 'round-seq (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params)))
+(expect-failure "D-2a a board carrying a round number is refused before the module runs"
+  "expected type object{n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wager}"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet atk.MALLORY { "entries": [ { "machine": 0, "stake": 1.0, "spins": 1 } ], "seq": 9 }))
+(expect-failure "D-2b an entry carrying a multiplier likewise"
+  "expected type object{n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wager}"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet atk.MALLORY { "entries": [ { "machine": 0, "stake": 1.0, "spins": 1, "mult": 40 } ] }))
+(expect-failure "D-2d an entry with no machine is refused the same way"
+  "expected type object{n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wager}"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet atk.MALLORY { "entries": [ { "stake": 1.0, "spins": 1 } ] }))
+(expect "D-2c and nothing opened" 8 (at 'round-seq (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params)))
+(rollback-tx)
+(env-sigs [])
+
+;; ============================================================================
+;; A-13  PROVE-LIVENESS -- anyone can show drand is alive without settling anything
+;;   Without it "drand went away" is indistinguishable from "nobody settled this
+;;   round", and the second is a loser's own choice.
+;; ============================================================================
+(begin-tx)
+(expect "A-13 PRECONDITION the record stands at Z's beacon" 20802059
+  (at 'last-beacon (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params)))
+(snap.keep "pot" (coin.get-balance (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account)))
+(snap.keep "r7" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 7))
+(commit-tx)
+(begin-tx)
+(expect "A-13a a genuine beacon raises the record, settling nothing" 20802172
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.prove-liveness 20802172 atk.SIG172))
+(expect "A-13b the record moved forward to it" 20802172
+  (at 'last-beacon (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params)))
+(expect "A-13c and NOT ONE KDA moved" (snap.got "pot") (snap.fmt (coin.get-balance (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account))))
+(expect "A-13d and the open round was not touched" (snap.got "r7") (snap.fmt (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 7)))
+(commit-tx)
+(begin-tx)
+(expect-failure "A-13e a forged beacon proves nothing" "drand signature does not verify"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.prove-liveness 20802173 atk.SIG172))
+(rollback-tx)
+(begin-tx)
+(expect-failure "A-13f a non-canonical encoding proves nothing either"
+  "G1 coordinates must be canonical"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.prove-liveness 20802172 (mall.enc 1 0)))
+(rollback-tx)
+(begin-tx)
+(expect-failure "A-13g the record cannot be walked backwards"
+  "a later beacon is already on record"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.prove-liveness 20801767 mall.SIG))
+(rollback-tx)
+(begin-tx)
+(expect-failure "A-13g1 nor re-proven at the record itself"
+  "a later beacon is already on record"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.prove-liveness 20802172 atk.SIG172))
+(rollback-tx)
+;; THE RESIDUAL, pinned so it cannot change silently: the module cannot tell
+;; "no beacon exists" from "nobody submitted one". The refund guard is only as
+;; strong as SOMEBODY calling prove-liveness or resolve within VOID-AFTER.
+(begin-tx)
+(expect "A-13h the record is exactly what was last PROVEN, nothing more" 20802172
+  (at 'last-beacon (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params)))
+(commit-tx)
+
+;; ============================================================================
+;; A-14 .. A-16  THE MACHINE A BOARD PLAYS
+;;   A fresh world (the harness reloaded with every table dropped): target
+;;   100,000, pot 100,000 (a round's cap is 2,000, room for big's 250x), launch
+;;   dials. Round 1 opens at 17:43:43 and pins beacon
+;;   20801767, so its seed is the measured round-1 seed of the other suites.
+;; ============================================================================
+(load "slots-test-init.repl" true)
+(begin-tx)
+(module m14 MG (defcap MG () (enforce true "ok"))
+  (defconst ALICE   "k:a11ce00000000000000000000000000000000000000000000000000000000001")
+  (defconst BOBBY   "k:b0b0000000000000000000000000000000000000000000000000000000000002")
+  (defconst MALLORY "k:ca40100000000000000000000000000000000000000000000000000000000003")
+  (defconst SIG "0d745db068db9e16379a49f65d76353d721d79fb459d20b33a50e750e5cdb10400af36e03d4a8414b3a86770d1d1e90e85462dce40b3cf5c27f9fdb477b6f6e0") ; 20801767
+  (defconst SEED1:integer 41473200179623307258957694415769443739304335489542769187234381733079227613887)
+  ;; everything A-16 must find unchanged after a refused board
+  (defun world:object ()
+    (let ((g (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params)))
+      { "round-seq": (at 'round-seq g), "current": (at 'current g), "reserved": (at 'reserved g)
+      , "pot": (coin.get-balance (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account)), "alice": (coin.get-balance ALICE)
+      , "board": (try "none" (format "{}" [(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 ALICE)])) }))
+  (defun round1:object ()
+    (try { "exposure": 0.0, "stake": 0.0, "boards": 0, "fee-owed": 0.0 }
+      (let ((r (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)))
+        { "exposure": (at 'exposure r), "stake": (at 'stake r), "boards": (at 'boards r), "fee-owed": (at 'fee-owed r) }))))
+(module snap14 SG (defcap SG () (enforce true "ok"))
+  (defschema s v:string)
+  (deftable t:{s})
+  (defun fmt:string (x) (format "{}" [x]))
+  (defun keep:string (k:string x) (write t k { "v": (fmt x) }))
+  (defun got:string (k:string) (at 'v (read t k))))
+(create-table snap14.t)
+(commit-tx)
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.initialize n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT 100000.0)
+(commit-tx)
+(env-sigs [{"key":"h0u5e00000000000000000000000000000000000000000000000000000000004"
+           ,"caps":[(coin.TRANSFER "house-funder" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 100000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.fund-house "house-funder" 100000.0)
+(commit-tx)
+(env-sigs [])
+
+;; ============================================================================
+;; A-16  AN UNKNOWN MACHINE CANNOT OPEN A ROUND OR RESERVE ANYTHING
+;;   `bet` checks the machine id FIRST, before the minimum and before any write.
+;;   Refused on an empty table (it would have opened a round) and while a round
+;;   is open (it would have joined it); after each refusal, in the SAME
+;;   transaction -- so a partial write that the REPL does not undo would show --
+;;   the round counter, the reserve, the pot, the player's balance, the board
+;;   row and the open round's totals are exactly as before. Then rolled back.
+;; ============================================================================
+(env-chain-data { "block-time": (time "2026-09-20T17:43:43Z") })
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER m14.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 1000.0)]}])
+(begin-tx)
+(snap14.keep "w0" (m14.world))
+(commit-tx)
+(begin-tx)
+(expect "A-16 PRECONDITION no round has ever opened" [0 0 0.0]
+  [(at 'round-seq (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params)) (at 'current (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params)) (at 'reserved (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params))])
+(expect-failure "A-16a machine 6, one past the last, cannot open a round"
+  "unknown machine 6: machines are 0 to 5"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet m14.ALICE { "entries": [ { "machine": 6, "stake": 1.0, "spins": 1 } ] }))
+(expect "A-16b after the refusal nothing moved: no round, no reserve, no coin, no board"
+  (snap14.got "w0") (snap14.fmt (m14.world)))
+(expect-failure "A-16c nor machine -1"
+  "unknown machine -1: machines are 0 to 5"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet m14.ALICE { "entries": [ { "machine": -1, "stake": 1.0, "spins": 1 } ] }))
+(expect "A-16d and after that refusal too, nothing moved"
+  (snap14.got "w0") (snap14.fmt (m14.world)))
+;; the id is checked before the minimum: a stake under the minimum on an unknown
+;; machine is refused as an unknown machine
+(expect-failure "A-16e the machine is checked FIRST, before the table minimum"
+  "unknown machine 1000: machines are 0 to 5"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet m14.ALICE { "entries": [ { "machine": 1000, "stake": 0.0001, "spins": 1 } ] }))
+(rollback-tx)
+(begin-tx)
+(expect "A-16f CONTROL the same board on machine 5, the last id, opens round 1" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet m14.ALICE { "entries": [ { "machine": 5, "stake": 1.0, "spins": 1 } ] }))
+(expect "A-16g CONTROL and it reserved 112.6 x 1.0" 112.6 (at 'exposure (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)))
+(rollback-tx)
+(begin-tx)
+(expect "A-16h CONTROL machine 0, the first id, opens round 1" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet m14.ALICE { "entries": [ { "machine": 0, "stake": 1.0, "spins": 1 } ] }))
+(rollback-tx)
+
+;; ---- bob's 4-spin board on the BIG machine opens round 1 ----------------------
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER m14.BOBBY (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 1000.0)]}])
+(begin-tx)
+(expect "A-14 PRECONDITION bob's 4 x 1.0 board on machine 2 (big) opens round 1" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet m14.BOBBY { "entries": [ { "machine": 2, "stake": 1.0, "spins": 4 } ] }))
+(expect "A-14a the board row records machine 2" 2 (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 m14.BOBBY)))))
+(expect "A-14b and the round reserves big's 250 x 4.0" 1000.0 (at 'exposure (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)))
+(commit-tx)
+(begin-tx)
+(snap14.keep "w1" (m14.world))
+(snap14.keep "r1" (m14.round1))
+(commit-tx)
+;; A-16 again, on the OPEN round: an unknown machine cannot join it either
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER m14.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 1000.0)]}])
+(begin-tx)
+(expect-failure "A-16i machine 6 cannot join the open round"
+  "unknown machine 6: machines are 0 to 5"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet m14.ALICE { "entries": [ { "machine": 6, "stake": 1.0, "spins": 1 } ] }))
+(expect "A-16j the game row, pot, balance and board row did not move" (snap14.got "w1") (snap14.fmt (m14.world)))
+(expect "A-16k and the open round's exposure, stake, boards and fee did not move" (snap14.got "r1") (snap14.fmt (m14.round1)))
+(rollback-tx)
+;; ---- nor can bob move his board to another machine once placed ----------------
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER m14.BOBBY (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 1000.0)]}])
+(begin-tx)
+(expect-failure "A-14c bob cannot re-place his board on the classic machine in the same round"
+  "you already have a board in this round"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet m14.BOBBY { "entries": [ { "machine": 0, "stake": 1.0, "spins": 4 } ] }))
+(rollback-tx)
+(env-sigs [])
+
+;; ============================================================================
+;; A-14  A BOARD'S MACHINE IS FIXED BY THE BOARD ROW
+;;   `claim` takes a round and an account, `resolve` a round and a signature:
+;;   neither has a machine parameter, so no caller of either can name a machine;
+;;   `claim` reads the machine from the board row. Mallory resolves round 1 and
+;;   cranks bob's claim. The spins stop where they would on any machine -- the
+;;   stops are the seed's -- but they are scored on big's strip and table:
+;;   Python oracle, round-1 seed, bob's first four spins:
+;;     big      units [0 0 0 4]  -> 4 x 1.0 = 4.0
+;;     classic  units [5 0 2 0]  -> would have paid 7.0
+;; ============================================================================
+(begin-tx)
+(expect "A-14d claim's signature is (seq account): no machine to pass" true
+  (contains "(defun claim:string (seq:integer account:string)" (at 'code (describe-module "n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots"))))
+(expect "A-14e resolve's signature is (seq sig-hex): no machine to pass" true
+  (contains "(defun resolve:integer (seq:integer sig-hex:string)" (at 'code (describe-module "n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots"))))
+(expect "A-14f claim takes the machine from the board row" true
+  (contains "\"entries\" := es" (at 'code (describe-module "n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots"))))
+(expect "A-14g CONTROL the same source read finds bet's wager parameter" true
+  (contains "(defun bet:string (account:string w:object{wager})" (at 'code (describe-module "n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots"))))
+(commit-tx)
+(env-chain-data { "block-time": (time "2026-09-20T17:47:00Z") })
+(begin-tx)
+(expect "A-14h mallory resolves round 1 to the measured seed" m14.SEED1 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.resolve 1 m14.SIG))
+(commit-tx)
+(begin-tx)
+(expect "A-14i PRECONDITION mallory and bob hold their starting balances" [100000.0 99996.0]
+  [(coin.get-balance m14.MALLORY) (coin.get-balance m14.BOBBY)])
+(expect "A-14j CONTROL on the classic table the same four spins would pay 7 units" 7
+  (at 'units (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-board m14.SEED1 m14.BOBBY 0 4 1.0)))
+(expect "A-14k on big's table they pay 4 units" 4
+  (at 'units (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-board m14.SEED1 m14.BOBBY 2 4 1.0)))
+(expect "A-14l mallory cranks bob's claim: it is scored on BIG, 4 x 1.0" "paid 4.000000000000"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 1 m14.BOBBY))
+(expect "A-14m the board recorded big's payout" 4.0 (at 'payout (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 m14.BOBBY)))
+(expect "A-14n and the stops the seed spun for bob, the same on every machine"
+  [43 5 45 48 59 14 16 48 61 50 52 43]
+  (at 'stops (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 m14.BOBBY)))
+(expect "A-14o bob was paid 4.0 (99,996 + 4.0), the cranking mallory nothing" [100000.0 100000.0]
+  [(coin.get-balance m14.BOBBY) (coin.get-balance m14.MALLORY)])
+(expect "A-14p and big's whole reserve, 250 x 4.0, was released" [0.0 0.0]
+  [(at 'liability (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)) (at 'reserved (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params))])
+(commit-tx)
+
+;; ============================================================================
+;; A-15  A SPIN NEVER RETURNS MORE THAN ITS MACHINE'S MAXIMUM
+;;   `spin-units` caps every spin at its machine's max-units (classic 40, easy 18,
+;;   big 250, wild 40, free-spins 100, tumble 563 in fifths). The bound is folded
+;;   over the 424 keys of the parity harness (400 probes plus 24 keys hunted for
+;;   the rare paths: wild's three wilds, free-spins retriggers, deep tumbles), on
+;;   every machine. The largest observed per machine (Python oracle,
+;;   diff/py.json) is pinned, and a bound one below it fails the same fold, so
+;;   the fold is not vacuous. The cap never binds -- each maximum is the
+;;   enumerated true one -- so an UNCAPPED recomputation built here from the
+;;   module's own public evaluators must agree with `spin-units` on every
+;;   rare-path key, and the cap expression is read in the source.
+;; ============================================================================
+(begin-tx)
+(module a15 AG (defcap AG () (enforce true "ok"))
+  (defconst MAXU:[integer] [40 18 250 40 100 563])
+  (defconst KEYS:[string] ["probe|0" "probe|1" "probe|2" "probe|3" "probe|4" "probe|5" "probe|6" "probe|7" "probe|8" "probe|9" "probe|10" "probe|11" "probe|12" "probe|13" "probe|14" "probe|15" "probe|16" "probe|17" "probe|18" "probe|19" "probe|20" "probe|21" "probe|22" "probe|23" "probe|24" "probe|25" "probe|26" "probe|27" "probe|28" "probe|29" "probe|30" "probe|31" "probe|32" "probe|33" "probe|34" "probe|35" "probe|36" "probe|37" "probe|38" "probe|39" "probe|40" "probe|41" "probe|42" "probe|43" "probe|44" "probe|45" "probe|46" "probe|47" "probe|48" "probe|49" "probe|50" "probe|51" "probe|52" "probe|53" "probe|54" "probe|55" "probe|56" "probe|57" "probe|58" "probe|59" "probe|60" "probe|61" "probe|62" "probe|63" "probe|64" "probe|65" "probe|66" "probe|67" "probe|68" "probe|69" "probe|70" "probe|71" "probe|72" "probe|73" "probe|74" "probe|75" "probe|76" "probe|77" "probe|78" "probe|79" "probe|80" "probe|81" "probe|82" "probe|83" "probe|84" "probe|85" "probe|86" "probe|87" "probe|88" "probe|89" "probe|90" "probe|91" "probe|92" "probe|93" "probe|94" "probe|95" "probe|96" "probe|97" "probe|98" "probe|99" "probe|100" "probe|101" "probe|102" "probe|103" "probe|104" "probe|105" "probe|106" "probe|107" "probe|108" "probe|109" "probe|110" "probe|111" "probe|112" "probe|113" "probe|114" "probe|115" "probe|116" "probe|117" "probe|118" "probe|119" "probe|120" "probe|121" "probe|122" "probe|123" "probe|124" "probe|125" "probe|126" "probe|127" "probe|128" "probe|129" "probe|130" "probe|131" "probe|132" "probe|133" "probe|134" "probe|135" "probe|136" "probe|137" "probe|138" "probe|139" "probe|140" "probe|141" "probe|142" "probe|143" "probe|144" "probe|145" "probe|146" "probe|147" "probe|148" "probe|149" "probe|150" "probe|151" "probe|152" "probe|153" "probe|154" "probe|155" "probe|156" "probe|157" "probe|158" "probe|159" "probe|160" "probe|161" "probe|162" "probe|163" "probe|164" "probe|165" "probe|166" "probe|167" "probe|168" "probe|169" "probe|170" "probe|171" "probe|172" "probe|173" "probe|174" "probe|175" "probe|176" "probe|177" "probe|178" "probe|179" "probe|180" "probe|181" "probe|182" "probe|183" "probe|184" "probe|185" "probe|186" "probe|187" "probe|188" "probe|189" "probe|190" "probe|191" "probe|192" "probe|193" "probe|194" "probe|195" "probe|196" "probe|197" "probe|198" "probe|199" "probe|200" "probe|201" "probe|202" "probe|203" "probe|204" "probe|205" "probe|206" "probe|207" "probe|208" "probe|209" "probe|210" "probe|211" "probe|212" "probe|213" "probe|214" "probe|215" "probe|216" "probe|217" "probe|218" "probe|219" "probe|220" "probe|221" "probe|222" "probe|223" "probe|224" "probe|225" "probe|226" "probe|227" "probe|228" "probe|229" "probe|230" "probe|231" "probe|232" "probe|233" "probe|234" "probe|235" "probe|236" "probe|237" "probe|238" "probe|239" "probe|240" "probe|241" "probe|242" "probe|243" "probe|244" "probe|245" "probe|246" "probe|247" "probe|248" "probe|249" "probe|250" "probe|251" "probe|252" "probe|253" "probe|254" "probe|255" "probe|256" "probe|257" "probe|258" "probe|259" "probe|260" "probe|261" "probe|262" "probe|263" "probe|264" "probe|265" "probe|266" "probe|267" "probe|268" "probe|269" "probe|270" "probe|271" "probe|272" "probe|273" "probe|274" "probe|275" "probe|276" "probe|277" "probe|278" "probe|279" "probe|280" "probe|281" "probe|282" "probe|283" "probe|284" "probe|285" "probe|286" "probe|287" "probe|288" "probe|289" "probe|290" "probe|291" "probe|292" "probe|293" "probe|294" "probe|295" "probe|296" "probe|297" "probe|298" "probe|299" "probe|300" "probe|301" "probe|302" "probe|303" "probe|304" "probe|305" "probe|306" "probe|307" "probe|308" "probe|309" "probe|310" "probe|311" "probe|312" "probe|313" "probe|314" "probe|315" "probe|316" "probe|317" "probe|318" "probe|319" "probe|320" "probe|321" "probe|322" "probe|323" "probe|324" "probe|325" "probe|326" "probe|327" "probe|328" "probe|329" "probe|330" "probe|331" "probe|332" "probe|333" "probe|334" "probe|335" "probe|336" "probe|337" "probe|338" "probe|339" "probe|340" "probe|341" "probe|342" "probe|343" "probe|344" "probe|345" "probe|346" "probe|347" "probe|348" "probe|349" "probe|350" "probe|351" "probe|352" "probe|353" "probe|354" "probe|355" "probe|356" "probe|357" "probe|358" "probe|359" "probe|360" "probe|361" "probe|362" "probe|363" "probe|364" "probe|365" "probe|366" "probe|367" "probe|368" "probe|369" "probe|370" "probe|371" "probe|372" "probe|373" "probe|374" "probe|375" "probe|376" "probe|377" "probe|378" "probe|379" "probe|380" "probe|381" "probe|382" "probe|383" "probe|384" "probe|385" "probe|386" "probe|387" "probe|388" "probe|389" "probe|390" "probe|391" "probe|392" "probe|393" "probe|394" "probe|395" "probe|396" "probe|397" "probe|398" "probe|399" "hunt|102" "hunt|2587" "hunt|3115" "hunt|5215" "hunt|5239" "hunt|5833" "hunt|25" "hunt|96" "hunt|244" "hunt|374" "hunt|509" "hunt|516" "hunt|147" "hunt|264" "hunt|419" "hunt|484" "hunt|491" "hunt|577" "hunt|1339" "hunt|98699" "hunt|102803" "hunt|113304" "hunt|122090" "hunt|131535"])
+  (defconst RARE:[string] ["hunt|102" "hunt|2587" "hunt|3115" "hunt|5215" "hunt|5239" "hunt|5833" "hunt|25" "hunt|96" "hunt|244" "hunt|374" "hunt|509" "hunt|516" "hunt|147" "hunt|264" "hunt|419" "hunt|484" "hunt|491" "hunt|577" "hunt|1339" "hunt|98699" "hunt|102803" "hunt|113304" "hunt|122090" "hunt|131535"])
+  (defun units:[integer] (id:integer ks:[string]) (map (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.spin-units id) ks))
+  (defun top:integer (id:integer)
+    (fold (lambda (m:integer u:integer) (if (> u m) u m)) 0 (units id KEYS)))
+  (defun within:bool (id:integer bound:integer)
+    (fold (lambda (ok:bool u:integer) (and ok (<= u bound))) true (units id KEYS)))
+  ;; spin-units WITHOUT its final cap, from the module's public evaluators
+  (defun raw-units:integer (id:integer key:string)
+    (let* ((m (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.machine-at id))
+           (reel (at 'reel m)) (p (at 'pays m)) (kind (at 'kind m))
+           (stops (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.key-stops key))
+           (y (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.symbols-at reel stops)))
+      (if (= kind "line") (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay p (at 0 y) (at 1 y) (at 2 y))
+        (if (= kind "wild") (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wild-pay p (at 0 y) (at 1 y) (at 2 y))
+          (if (= kind "free")
+              (let ((look (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.free-look reel p stops)))
+                (+ (at 'win look) (if (at 'trigger look) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.free-bonus reel p key) 0)))
+              (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.tumble-units reel p stops))))))
+  (defun raw-agrees:bool (id:integer)
+    (= (units id RARE) (map (raw-units id) RARE))))
+(commit-tx)
+(begin-tx)
+(expect "A-15 PRECONDITION the fold covers 424 keys, 24 of them rare-path" [424 24]
+  [(length a15.KEYS) (length a15.RARE)])
+(expect "A-15a the machines' maxima, as the module plays them" [40 18 250 40 100 563]
+  (map (lambda (m:object) (at 'max-units m)) n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.MACHINES))
+(expect "A-15b0 machine 0: no key returns more than 40 units" true (a15.within 0 (at 0 a15.MAXU)))
+(expect "A-15b1 machine 1: no key returns more than 18 units" true (a15.within 1 (at 1 a15.MAXU)))
+(expect "A-15b2 machine 2: no key returns more than 250 units" true (a15.within 2 (at 2 a15.MAXU)))
+(expect "A-15b3 machine 3: no key returns more than 40 units" true (a15.within 3 (at 3 a15.MAXU)))
+(expect "A-15b4 machine 4: no key returns more than 100 units" true (a15.within 4 (at 4 a15.MAXU)))
+(expect "A-15b5 machine 5: no key returns more than 563 units" true (a15.within 5 (at 5 a15.MAXU)))
+(expect "A-15c the largest units observed per machine (oracle, diff/py.json)" [20 2 30 40 84 268]
+  (map (a15.top) [0 1 2 3 4 5]))
+(expect "A-15d0 CONTROL machine 0: against 19, one under the largest seen, the fold fails" false (a15.within 0 19))
+(expect "A-15d1 CONTROL machine 1: against 1, one under the largest seen, the fold fails" false (a15.within 1 1))
+(expect "A-15d2 CONTROL machine 2: against 29, one under the largest seen, the fold fails" false (a15.within 2 29))
+(expect "A-15d3 CONTROL machine 3: against 39, one under the largest seen, the fold fails" false (a15.within 3 39))
+(expect "A-15d4 CONTROL machine 4: against 83, one under the largest seen, the fold fails" false (a15.within 4 83))
+(expect "A-15d5 CONTROL machine 5: against 267, one under the largest seen, the fold fails" false (a15.within 5 267))
+(expect "A-15h0 machine 0: spin-units on the rare-path keys match the oracle, key for key"
+  [0 0 0 0 0 0 20 0 20 0 0 10 0 0 0 0 5 0 0 0 0 0 0 0]
+  (a15.units 0 a15.RARE))
+(expect "A-15h1 machine 1: spin-units on the rare-path keys match the oracle, key for key"
+  [2 2 2 2 2 2 0 2 0 0 2 2 2 2 0 2 0 0 2 2 2 2 2 2]
+  (a15.units 1 a15.RARE))
+(expect "A-15h2 machine 2: spin-units on the rare-path keys match the oracle, key for key"
+  [4 30 4 4 4 4 8 0 8 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+  (a15.units 2 a15.RARE))
+(expect "A-15h3 machine 3: spin-units on the rare-path keys match the oracle, key for key"
+  [0 40 0 0 0 16 8 0 8 0 0 6 0 0 0 0 5 0 0 0 0 0 0 0]
+  (a15.units 3 a15.RARE))
+(expect "A-15h4 machine 4: spin-units on the rare-path keys match the oracle, key for key"
+  [0 0 0 0 0 0 20 22 20 22 14 10 0 0 0 0 5 0 60 64 60 84 84 62]
+  (a15.units 4 a15.RARE))
+(expect "A-15h5 machine 5: spin-units on the rare-path keys match the oracle, key for key"
+  [0 268 18 18 0 25 0 35 39 35 35 7 92 75 75 53 85 64 0 63 0 0 0 0]
+  (a15.units 5 a15.RARE))
+(expect "A-15r0 CONTROL machine 0: the uncapped recomputation equals spin-units on every rare-path key" true (a15.raw-agrees 0))
+(expect "A-15r1 CONTROL machine 1: the uncapped recomputation equals spin-units on every rare-path key" true (a15.raw-agrees 1))
+(expect "A-15r2 CONTROL machine 2: the uncapped recomputation equals spin-units on every rare-path key" true (a15.raw-agrees 2))
+(expect "A-15r3 CONTROL machine 3: the uncapped recomputation equals spin-units on every rare-path key" true (a15.raw-agrees 3))
+(expect "A-15r4 CONTROL machine 4: the uncapped recomputation equals spin-units on every rare-path key" true (a15.raw-agrees 4))
+(expect "A-15r5 CONTROL machine 5: the uncapped recomputation equals spin-units on every rare-path key" true (a15.raw-agrees 5))
+(expect "A-15s the cap is in spin-units' code path" true
+  (contains "(if (> u cap) cap u)" (at 'code (describe-module "n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots"))))
+(expect "A-15t and its bound is the machine's own max-units" true
+  (contains "(cap (at 'max-units m))" (at 'code (describe-module "n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots"))))
+(commit-tx)
+
+;; ============================================================================
+;; A-17 .. A-20  A BOARD PLAYS ONE MACHINE
+;;   Round 2 of this world opens at 17:43:46 and pins beacon 20801768, so its seed is the
+;;   verifier's seed for "slots|2" at 20801768 (the oracle suite's round-2 seed). Alice signs
+;;   easy 4 x 1.0, mallory free-spins 10 x 0.2, bob wild 2 x 0.1: one machine each. Every
+;;   stop, unit and payout below is the second independent oracle's, from that seed.
+;;   A board that names a second machine is refused before any entry is read, so a player
+;;   cannot play two machines in one round from one account: one board per account per
+;;   round (A-17b) and one machine per board (A-17b1) together.
+;; ============================================================================
+(begin-tx)
+(module m17 MG (defcap MG () (enforce true "ok"))
+  (defconst SIG "3046d0014da5e70c6a4c99fc5fafde0cc68ae79d82ece3177dc7d6147945cfb502d3ce355c42c98368f003bf089aebb110ee7119f62d6402a2187d58f44f297a") ; 20801768
+  (defconst SEED2:integer 46631579439097871866260387162966821216809974861117406717532106310446770450219)
+  (defconst SIGNED:[object] [{ "machine": 1, "stake": 1.0, "spins": 4 }])
+  (defconst TWO:[object] [{ "machine": 1, "stake": 1.0, "spins": 4 } { "machine": 5, "stake": 1.0, "spins": 4 }])
+  (defun pot:decimal () (coin.get-balance (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account)))
+  (defun reserved:decimal () (at 'reserved (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params)))
+  (defun solvent:bool () (>= (pot) (reserved)))
+  (defschema d n:decimal)
+  (deftable td:{d})
+  (defun keepd:string (k:string x:decimal) (write td k { "n": x }))
+  (defun gotd:decimal (k:string) (at 'n (read td k)))
+  ;; everything a refused board must leave as it was: the game row, the pot, bob's coin,
+  ;; bob's round-2 board (none) and round 2's own row
+  (defun world:object ()
+    { "game": (format "{}" [(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params)]), "pot": (pot)
+    , "bob": (coin.get-balance m14.BOBBY)
+    , "board": (try "none" (format "{}" [(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 2 m14.BOBBY)]))
+    , "round": (try "none" (format "{}" [(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 2)])) })
+  ;; true when no board of these shapes, for these accounts and seeds, is ever paid more
+  ;; than it reserved: every spin capped at its machine's maximum
+  (defun within:bool (seeds:[integer] accts:[string] shapes:[[object]] slack:decimal)
+    (fold (lambda (ok:bool s:integer)
+            (fold (lambda (ok2:bool a:string)
+                    (fold (lambda (ok3:bool es:[object])
+                            (and ok3 (<= (at 'payout (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-entries s a es))
+                                         (* slack (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.entries-reserve es)))))
+                          ok2 shapes))
+                  ok accts))
+          true seeds)))
+(create-table m17.td)
+(commit-tx)
+(env-chain-data { "block-time": (time "2026-09-20T17:43:46Z") })
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER m14.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 1000.0)]}])
+(begin-tx)
+(expect "A-17 PRECONDITION alice's one-machine board, easy 4 x 1.0, opens round 2" "bet placed in round 2"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet m14.ALICE { "entries": [{ "machine": 1, "stake": 1.0, "spins": 4 }] }))
+(expect "A-17 PRECONDITION round 2 pins beacon 20801768" 20801768 (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 2)))
+(expect "A-17a the board row holds her entry exactly as signed" m17.SIGNED
+  (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 2 m14.ALICE)))
+(expect "A-17a1 and books 18 x 4.0 = 72.0" 72.0 (at 'reserve (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 2 m14.ALICE)))
+(expect "A-19 the pot covers everything reserved after her board" true (m17.solvent))
+(commit-tx)
+(begin-tx)
+(expect-failure "A-17b alice cannot add a second machine with a second board in the same round"
+  "you already have a board in this round"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet m14.ALICE { "entries": [{ "machine": 5, "stake": 1.0, "spins": 4 }] }))
+(rollback-tx)
+(begin-tx)
+(expect-failure "A-17b1 nor carry two machines on one board: a board plays one machine"
+  "a board plays one machine: it holds exactly one entry"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet m14.ALICE { "entries": m17.TWO }))
+(rollback-tx)
+(env-sigs [])
+(env-sigs [{"key":"ca40100000000000000000000000000000000000000000000000000000000003"
+           ,"caps":[(coin.TRANSFER m14.MALLORY (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 1000.0)]}])
+(begin-tx)
+(expect "A-19a mallory's one-machine board, free-spins 10 x 0.2, joins round 2" "bet placed in round 2"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet m14.MALLORY { "entries": [{ "machine": 4, "stake": 0.2, "spins": 10 }] }))
+(expect "A-19b the round's exposure is 72.0 + 100 x 2.0 = 272.0" 272.0
+  (at 'exposure (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 2)))
+(expect "A-19c and the pot still covers everything reserved" true (m17.solvent))
+(commit-tx)
+(env-sigs [])
+;; ============================================================================
+;; A-20  THE MACHINE-ID BOUNDARY, AND THE ONE-ENTRY BOUNDARY
+;;   Bob tries to join the OPEN round 2 with malformed boards. Each is refused, and after
+;;   each refusal, in the SAME transaction (so a partial write the REPL does not undo would
+;;   show), the game row, the pot, bob's coin, his (absent) board and round 2's row are
+;;   exactly as before. The engine's own shape refusal carries one message for every shape
+;;   error, so each shape probe has a CONTROL: the same board with only the malformed part
+;;   corrected is accepted (rolled back). A second entry is refused by the COUNT before any
+;;   entry is read, whatever is wrong or right inside it.
+;; ============================================================================
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER m14.BOBBY (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 1000.0)]}])
+(begin-tx)
+(snap14.keep "w2" (m17.world))
+(commit-tx)
+(begin-tx)
+(expect "A-20 PRECONDITION round 2 is open and bob has no board in it" ["open" "none"]
+  [(at 'state (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 2)) (try "none" (format "{}" [(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 2 m14.BOBBY)]))])
+(commit-tx)
+(begin-tx)
+(expect-failure "A-20a machine 6 is refused"
+  "unknown machine 6: machines are 0 to 5"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet m14.BOBBY { "entries": [{ "machine": 6, "stake": 0.1, "spins": 2 }] }))
+(expect "A-20a1 and nothing moved: game row, pot, bob's coin, board, round 2" (snap14.got "w2") (snap14.fmt (m17.world)))
+(expect-failure "A-20b machine -1 is refused"
+  "unknown machine -1: machines are 0 to 5"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet m14.BOBBY { "entries": [{ "machine": -1, "stake": 0.1, "spins": 2 }] }))
+(expect "A-20b1 and nothing moved: game row, pot, bob's coin, board, round 2" (snap14.got "w2") (snap14.fmt (m17.world)))
+(expect-failure "A-20c a decimal machine id (1.0) is refused by the engine's shape check"
+  "Runtime typecheck failure, argument is object , but expected type object{n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wager}"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet m14.BOBBY { "entries": [{ "machine": 1.0, "stake": 0.1, "spins": 2 }] }))
+(expect "A-20c1 and nothing moved: game row, pot, bob's coin, board, round 2" (snap14.got "w2") (snap14.fmt (m17.world)))
+(expect-failure "A-20d a string machine id (\"1\") is refused the same way"
+  "Runtime typecheck failure, argument is object , but expected type object{n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wager}"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet m14.BOBBY { "entries": [{ "machine": "1", "stake": 0.1, "spins": 2 }] }))
+(expect "A-20d1 and nothing moved: game row, pot, bob's coin, board, round 2" (snap14.got "w2") (snap14.fmt (m17.world)))
+(expect-failure "A-20e a second entry on another machine is refused"
+  "a board plays one machine: it holds exactly one entry"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet m14.BOBBY { "entries": [{ "machine": 0, "stake": 0.1, "spins": 2 } { "machine": 1, "stake": 0.1, "spins": 2 }] }))
+(expect "A-20e1 and nothing moved: game row, pot, bob's coin, board, round 2" (snap14.got "w2") (snap14.fmt (m17.world)))
+(expect-failure "A-20f the same machine as a second entry is refused"
+  "a board plays one machine: it holds exactly one entry"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet m14.BOBBY { "entries": [{ "machine": 0, "stake": 0.1, "spins": 2 } { "machine": 0, "stake": 0.2, "spins": 1 }] }))
+(expect "A-20f1 and nothing moved: game row, pot, bob's coin, board, round 2" (snap14.got "w2") (snap14.fmt (m17.world)))
+(expect-failure "A-20g seven entries are refused"
+  "a board plays one machine: it holds exactly one entry"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet m14.BOBBY { "entries": [{ "machine": 0, "stake": 0.1, "spins": 1 } { "machine": 1, "stake": 0.1, "spins": 1 } { "machine": 2, "stake": 0.1, "spins": 1 } { "machine": 3, "stake": 0.1, "spins": 1 } { "machine": 4, "stake": 0.1, "spins": 1 } { "machine": 5, "stake": 0.1, "spins": 1 } { "machine": 0, "stake": 0.1, "spins": 1 }] }))
+(expect "A-20g1 and nothing moved: game row, pot, bob's coin, board, round 2" (snap14.got "w2") (snap14.fmt (m17.world)))
+(expect-failure "A-20h no entries at all are refused"
+  "a board plays one machine: it holds exactly one entry"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet m14.BOBBY { "entries": [] }))
+(expect "A-20h1 and nothing moved: game row, pot, bob's coin, board, round 2" (snap14.got "w2") (snap14.fmt (m17.world)))
+(expect-failure "A-20i an entry carrying an extra field (a multiplier) is refused by the shape check"
+  "Runtime typecheck failure, argument is object , but expected type object{n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wager}"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet m14.BOBBY { "entries": [{ "machine": 1, "stake": 0.1, "spins": 2, "mult": 40 }] }))
+(expect "A-20i1 and nothing moved: game row, pot, bob's coin, board, round 2" (snap14.got "w2") (snap14.fmt (m17.world)))
+(expect-failure "A-20j an entry carrying nested entries is refused by the shape check"
+  "Runtime typecheck failure, argument is object , but expected type object{n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wager}"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet m14.BOBBY { "entries": [{ "machine": 1, "stake": 0.1, "spins": 2, "entries": [{ "machine": 2, "stake": 1.0, "spins": 20 }] }] }))
+(expect "A-20j1 and nothing moved: game row, pot, bob's coin, board, round 2" (snap14.got "w2") (snap14.fmt (m17.world)))
+(expect-failure "A-20k an entry with no machine is refused by the shape check"
+  "Runtime typecheck failure, argument is object , but expected type object{n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wager}"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet m14.BOBBY { "entries": [{ "stake": 0.1, "spins": 2 }] }))
+(expect "A-20k1 and nothing moved: game row, pot, bob's coin, board, round 2" (snap14.got "w2") (snap14.fmt (m17.world)))
+(expect-failure "A-20l a bad machine id in a SECOND entry is refused by the count, before the entry is read"
+  "a board plays one machine: it holds exactly one entry"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet m14.BOBBY { "entries": [{ "machine": 0, "stake": 0.1, "spins": 2 } { "machine": 7, "stake": 0.1, "spins": 2 }] }))
+(expect "A-20l1 and nothing moved: game row, pot, bob's coin, board, round 2" (snap14.got "w2") (snap14.fmt (m17.world)))
+(expect-failure "A-20m a sub-minimum stake"
+  "stake per spin below the table minimum"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet m14.BOBBY { "entries": [{ "machine": 2, "stake": 0.009, "spins": 2 }] }))
+(expect "A-20m1 and nothing moved: game row, pot, bob's coin, board, round 2" (snap14.got "w2") (snap14.fmt (m17.world)))
+(expect-failure "A-20n a sub-precision stake"
+  "Amount violates minimum precision"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet m14.BOBBY { "entries": [{ "machine": 2, "stake": 0.0100000000001, "spins": 2 }] }))
+(expect "A-20n1 and nothing moved: game row, pot, bob's coin, board, round 2" (snap14.got "w2") (snap14.fmt (m17.world)))
+(expect-failure "A-20o 78 spins, one over MAX-SPINS"
+  "spins must be between 1 and 77"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet m14.BOBBY { "entries": [{ "machine": 2, "stake": 0.1, "spins": 78 }] }))
+(expect "A-20o1 and nothing moved: game row, pot, bob's coin, board, round 2" (snap14.got "w2") (snap14.fmt (m17.world)))
+(expect-failure "A-20p 0 spins"
+  "spins must be between 1 and 77"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet m14.BOBBY { "entries": [{ "machine": 2, "stake": 0.1, "spins": 0 }] }))
+(expect "A-20p1 and nothing moved: game row, pot, bob's coin, board, round 2" (snap14.got "w2") (snap14.fmt (m17.world)))
+(expect-failure "A-20q a sub-minimum stake in a SECOND entry is refused by the count too"
+  "a board plays one machine: it holds exactly one entry"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet m14.BOBBY { "entries": [{ "machine": 0, "stake": 0.1, "spins": 2 } { "machine": 2, "stake": 0.009, "spins": 2 }] }))
+(expect "A-20q1 and nothing moved: game row, pot, bob's coin, board, round 2" (snap14.got "w2") (snap14.fmt (m17.world)))
+(rollback-tx)
+(begin-tx)
+(expect "A-20c2 CONTROL the same board with only that entry corrected joins round 2" "bet placed in round 2"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet m14.BOBBY { "entries": [{ "machine": 1, "stake": 0.1, "spins": 2 }] }))
+(rollback-tx)
+(begin-tx)
+(expect "A-20d2 CONTROL the same board with only that entry corrected joins round 2" "bet placed in round 2"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet m14.BOBBY { "entries": [{ "machine": 1, "stake": 0.1, "spins": 2 }] }))
+(rollback-tx)
+(begin-tx)
+(expect "A-20i2 CONTROL the same board with only that entry corrected joins round 2" "bet placed in round 2"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet m14.BOBBY { "entries": [{ "machine": 1, "stake": 0.1, "spins": 2 }] }))
+(rollback-tx)
+(begin-tx)
+(expect "A-20j2 CONTROL the same board with only that entry corrected joins round 2" "bet placed in round 2"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet m14.BOBBY { "entries": [{ "machine": 1, "stake": 0.1, "spins": 2 }] }))
+(rollback-tx)
+(begin-tx)
+(expect "A-20k2 CONTROL the same board with only that entry corrected joins round 2" "bet placed in round 2"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet m14.BOBBY { "entries": [{ "machine": 1, "stake": 0.1, "spins": 2 }] }))
+(rollback-tx)
+(begin-tx)
+(expect "A-20o2 CONTROL exactly 77 spins join round 2" "bet placed in round 2"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet m14.BOBBY { "entries": [{ "machine": 2, "stake": 0.01, "spins": 77 }] }))
+(rollback-tx)
+(begin-tx)
+(expect "A-20r CONTROL bob's one-machine board, wild 2 x 0.1, joins round 2" "bet placed in round 2"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet m14.BOBBY { "entries": [{ "machine": 3, "stake": 0.1, "spins": 2 }] }))
+(expect "A-20s and it holds that one machine" [3]
+  (map (lambda (e:object) (at 'machine e)) (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 2 m14.BOBBY))))
+(expect "A-19d the pot covers everything reserved after bob's board too" true (m17.solvent))
+(expect "A-19e round 2 reserves every board: 72.0 + 200.0 + 40 x 0.2 = 280.0" 280.0
+  (at 'exposure (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 2)))
+(commit-tx)
+(env-sigs [])
+(env-chain-data { "block-time": (time "2026-09-20T17:47:00Z") })
+(begin-tx)
+(expect "A-17c round 2 resolves to the verifier's seed for slots|2 at 20801768" m17.SEED2 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.resolve 2 m17.SIG))
+(expect "A-19f resolving (the fee leaves the pot) keeps the pot covering what is owed" true (m17.solvent))
+(commit-tx)
+;; ============================================================================
+;; A-17  THE BOARD ROW IS WHAT IS PLAYED
+;;   `claim` takes (seq account) only (A-14d), reads the entry from the board row and plays
+;;   it; the one write it makes to a board never touches the entry. Mallory cranks alice's
+;;   claim. Under round 2's seed alice's easy 4 x 1.0 scores 4 units and pays 4.0 (oracle).
+;; ============================================================================
+(begin-tx)
+(expect "A-17d her board scores 4 units, 4.0 at 1.0 (oracle)" { "units": [4], "payout": 4.0 }
+  (let ((p (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-entries m17.SEED2 m14.ALICE m17.SIGNED))) { "units": (at 'units p), "payout": (at 'payout p) }))
+(expect "A-17f claim plays the entries it reads from the board row" true
+  (contains "(play-entries seed account es)" (at 'code (describe-module "n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots"))))
+(expect "A-17g and the one write claim makes to a board touches claimed, stops and payout, never its entries" true
+  (contains "{ \"claimed\": true, \"stops\": (at 'stops played), \"payout\": amount }" (at 'code (describe-module "n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots"))))
+(expect "A-17h mallory cranks alice's claim: it pays 4.0" "paid 4.000000000000"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 2 m14.ALICE))
+(expect "A-17i the board recorded 4.0" 4.0
+  (at 'payout (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 2 m14.ALICE)))
+(expect "A-17j its stops are spins 1-4 of alice's key stream (oracle)"
+  [43 4 20 29 44 19 40 42 7 25 20 24]
+  (at 'stops (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 2 m14.ALICE)))
+(expect "A-17k and the row's entry is still the signed one after the claim" m17.SIGNED
+  (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 2 m14.ALICE)))
+(expect "A-17l alice holds 100,000 - 4.0 + 4.0, the cranking mallory 100,000 - 2.0" [100000.0 99998.0]
+  [(coin.get-balance m14.ALICE) (coin.get-balance m14.MALLORY)])
+(expect "A-19g the pot covers what is still owed after her claim" true (m17.solvent))
+(commit-tx)
+(begin-tx)
+(expect-failure "A-17m and her settled board cannot be claimed again" "this board has already been claimed"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 2 m14.ALICE))
+(rollback-tx)
+;; ============================================================================
+;; A-18  THE PREFIX PROPERTY
+;;   Spin i depends on the seed, the account and i alone, so a longer board plays the
+;;   shorter board's spins first and re-rolls none of them; which is why the spin count is
+;;   fixed by the one signature before the seed exists (A-12). Pure: alice's easy under
+;;   round 2's seed (oracle: 4 spins score 4 units, 8 spins 10).
+;; ============================================================================
+(begin-tx)
+(expect "A-18a easy 8 x 1.0 scores 10 units, 4 x 1.0 scores 4 (oracle)" [10 4]
+  [(at 'units (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-board m17.SEED2 m14.ALICE 1 8 1.0)) (at 'units (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-board m17.SEED2 m14.ALICE 1 4 1.0))])
+(expect "A-18b and the 8-spin board's stops begin with the 4-spin board's 12" true
+  (= (at 'stops (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-board m17.SEED2 m14.ALICE 1 4 1.0))
+     (take 12 (at 'stops (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-board m17.SEED2 m14.ALICE 1 8 1.0)))))
+(expect "A-18c the 8-spin board's last 12 stops, spins 5-8 (oracle)" [58 55 60 40 54 13 47 11 56 26 35 28]
+  (drop 12 (at 'stops (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-board m17.SEED2 m14.ALICE 1 8 1.0))))
+(commit-tx)
+;; ============================================================================
+;; A-19  SOLVENCY
+;;   A board reserves its machine's maximum x its total, and every spin is capped at that
+;;   maximum, so no board is ever paid more than it reserved. Live: the pot covered
+;;   `reserved` after every bet, the resolve and each claim, each claim releases exactly its
+;;   row's reserve, and the round ends owing nothing. Pure: every machine at MAX-SPINS and at
+;;   mallory's and bob's shapes, for three accounts under two seeds.
+;; ============================================================================
+(begin-tx)
+(m17.keepd "res" (m17.reserved))
+(commit-tx)
+(begin-tx)
+(expect "A-19h mallory's board settles, cranked by anyone, and pays 15 units (oracle)" "paid 3.000000000000"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 2 m14.MALLORY))
+(expect "A-19i it released exactly its row's reserve, 100 x 2.0" 200.0
+  (- (m17.gotd "res") (m17.reserved)))
+(expect "A-19j the pot still covers what is owed" true (m17.solvent))
+(commit-tx)
+(begin-tx)
+(m17.keepd "res" (m17.reserved))
+(commit-tx)
+(begin-tx)
+(expect "A-19k bob's board pays 4 units (oracle)" "paid 0.400000000000"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 2 m14.BOBBY))
+(expect "A-19l it released exactly its row's reserve, 40 x 0.2" 8.0
+  (- (m17.gotd "res") (m17.reserved)))
+(expect "A-19m round 2 owes nothing and the pot's reserve is EXACTLY zero" [0.0 0.0]
+  [(at 'liability (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 2)) (m17.reserved)])
+(expect "A-19n mallory and bob hold 100,000 - stake + payout" [100001.0 100000.2]
+  [(coin.get-balance m14.MALLORY) (coin.get-balance m14.BOBBY)])
+(commit-tx)
+(begin-tx)
+(expect "A-19o no board of these shapes is paid more than it reserved (8 shapes x 3 accounts x 2 seeds)" true
+  (m17.within [41473200179623307258957694415769443739304335489542769187234381733079227613887 m17.SEED2] [m14.ALICE m14.BOBBY m14.MALLORY] [[{ "machine": 0, "stake": 0.1, "spins": 77 }] [{ "machine": 1, "stake": 0.1, "spins": 77 }] [{ "machine": 2, "stake": 0.1, "spins": 77 }] [{ "machine": 3, "stake": 0.1, "spins": 77 }] [{ "machine": 4, "stake": 0.1, "spins": 77 }] [{ "machine": 5, "stake": 0.1, "spins": 77 }] [{ "machine": 4, "stake": 0.2, "spins": 10 }] [{ "machine": 3, "stake": 0.1, "spins": 2 }]] 1.0))
+(expect "A-19p CONTROL the fold is not vacuous: against no reserve at all it fails (boards do win)" false
+  (m17.within [41473200179623307258957694415769443739304335489542769187234381733079227613887 m17.SEED2] [m14.ALICE m14.BOBBY m14.MALLORY] [[{ "machine": 0, "stake": 0.1, "spins": 77 }] [{ "machine": 1, "stake": 0.1, "spins": 77 }] [{ "machine": 2, "stake": 0.1, "spins": 77 }] [{ "machine": 3, "stake": 0.1, "spins": 77 }] [{ "machine": 4, "stake": 0.1, "spins": 77 }] [{ "machine": 5, "stake": 0.1, "spins": 77 }] [{ "machine": 4, "stake": 0.2, "spins": 10 }] [{ "machine": 3, "stake": 0.1, "spins": 2 }]] 0.0))
+(commit-tx)
+
+;; ============================================================================
+;; A-21 .. A-23  THE THREE MONEY PROMISES THE FOUNDER PAGE CARRIED UNPINNED
+;;   Fresh environment. Three rounds: R1 (bob, 20801768) is left with its beacon
+;;   never submitted; R2 (mallory, 3 spins, 20802059) is resolved and its winning
+;;   board left unclaimed; R3 (alice wins 2.0, bob loses under 20802172) is left
+;;   with nobody acting. Seeds and outcomes from the verifier and `play-board`.
+;;   A-21 the ninety-day refund returns every STAKE, a winner's included, never
+;;        the winnings (SP-088);
+;;   A-22 a round whose beacon is never submitted after the record has passed it
+;;        can be neither settled nor refunded, and what it holds stays locked, out
+;;        of the house's reach (SP-089);
+;;   A-23 unclaimed winnings never expire and the house can never withdraw them:
+;;        ten years on, the claim pays the same amount (SP-067).
+;; ============================================================================
+(load "slots-test-init.repl" true)
+(begin-tx)
+(module m21 MG (defcap MG () (enforce true "ok"))
+  (defconst ALICE   "k:a11ce00000000000000000000000000000000000000000000000000000000001")
+  (defconst BOBBY   "k:b0b0000000000000000000000000000000000000000000000000000000000002")
+  (defconst MALLORY "k:ca40100000000000000000000000000000000000000000000000000000000003")
+  (defconst SIG68  "3046d0014da5e70c6a4c99fc5fafde0cc68ae79d82ece3177dc7d6147945cfb502d3ce355c42c98368f003bf089aebb110ee7119f62d6402a2187d58f44f297a") ; 20801768
+  (defconst SIG59  "090610f4d8155e4d56b23988d4f0a0451e42a3cc2c296cf4bc98f5f3bbfed1a811d2467d48083eabef7f856e0e9198166abc9a67de356bee250adf30d4a3c5c7") ; 20802059
+  (defconst SIG172 "1f5b04f99e8ed51bbe06ffd960a7e6e421465bd5e0e873aade49e236a3131f06000addb82c5de70f69d0305dbb2a99d88da2d527bdd7ce9fd307263727445361") ; 20802172
+  ;; verified-seed "slots|3" 20802172 SIG172, read off the verifier
+  (defconst SEED3:integer 113681738990307287115793372276389237259787656144056506217434544693132924927252)
+  (defconst ONE   { "entries": [ { "machine": 0, "stake": 1.0, "spins": 1 } ] })
+  (defconst THREE { "entries": [ { "machine": 0, "stake": 1.0, "spins": 3 } ] })
+  (defun reserved:decimal () (at 'reserved (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params)))
+  (defun pot:decimal () (coin.get-balance (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account)))
+  (defun available:decimal () (- (pot) (reserved))))
+(commit-tx)
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.initialize n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT 100000.0)
+(commit-tx)
+(env-sigs [{"key":"h0u5e00000000000000000000000000000000000000000000000000000000004"
+           ,"caps":[(coin.TRANSFER "house-funder" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 100000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.fund-house "house-funder" 100000.0)
+(commit-tx)
+
+;; ---- R1: bob, one spin; its beacon 20801768 will never be submitted ----------
+(env-chain-data { "block-time": (time "2026-09-20T17:43:46Z") })
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER m21.BOBBY (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 100.0)]}])
+(begin-tx)
+(expect "A-21 PRECONDITION bob opens R1" "bet placed in round 1" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet m21.BOBBY m21.ONE))
+(expect "A-21 PRECONDITION R1 pins 20801768" 20801768 (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)))
+(commit-tx)
+;; ---- R2: mallory, three spins, resolved at once and never claimed -------------
+(env-chain-data { "block-time": (time "2026-09-20T17:58:19Z") })
+(env-sigs [{"key":"ca40100000000000000000000000000000000000000000000000000000000003"
+           ,"caps":[(coin.TRANSFER m21.MALLORY (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 100.0)]}])
+(begin-tx)
+(expect "A-21 PRECONDITION mallory opens R2" "bet placed in round 2" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet m21.MALLORY m21.THREE))
+(expect "A-21 PRECONDITION R2 pins 20802059" 20802059 (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 2)))
+(commit-tx)
+(env-sigs [])
+(env-chain-data { "block-time": (time "2026-09-20T18:01:00Z") })
+(begin-tx)
+(expect "A-21 PRECONDITION R2 resolves; the record is now 20802059, above R1's beacon"
+  21428448644648223619958992461645388415578119963527543799381736155343506188383
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.resolve 2 m21.SIG59))
+(expect "A-21 PRECONDITION and the record passed R1's beacon" 20802059 (at 'last-beacon (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params)))
+(commit-tx)
+;; ---- R3: alice (a winner under its beacon) and bob (a loser), nobody acts ----
+(env-chain-data { "block-time": (time "2026-09-20T18:03:58Z") })
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER m21.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 100.0)]}])
+(begin-tx)
+(expect "A-21 PRECONDITION alice opens R3" "bet placed in round 3" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet m21.ALICE m21.THREE))
+(commit-tx)
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER m21.BOBBY (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 100.0)]}])
+(begin-tx)
+(expect "A-21 PRECONDITION bob joins R3" "bet placed in round 3" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet m21.BOBBY m21.THREE))
+(expect "A-21 PRECONDITION R3 pins 20802172, above the record" 20802172 (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 3)))
+(commit-tx)
+(env-sigs [])
+(begin-tx)
+(expect "A-21a under R3's own beacon alice's board WOULD pay 2.0 and bob's nothing" [2.0 0.0]
+  [(at 'payout (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-board m21.SEED3 m21.ALICE 0 3 1.0)) (at 'payout (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-board m21.SEED3 m21.BOBBY 0 3 1.0))])
+(commit-tx)
+
+;; ---- ninety days of silence: R3's refund opens, R1's does not ---------------
+(env-chain-data { "block-time": (time "2027-01-05T00:00:00Z") })
+(begin-tx)
+(expect "A-21b CONTROL the grace has elapsed for R3" true
+  (> (diff-time (at 'block-time (chain-data)) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.time-of-round 20802172)) n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.VOID-AFTER))
+(expect "A-21c nobody acted for ninety days, so R3 refunds" "round void: every stake is refundable" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.void-round 3))
+(expect "A-21d the loser takes his stake back" "paid 3.0" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 3 m21.BOBBY))
+(expect "A-21e the winner gets her STAKE back too, 3.0, not the 2.0 her reels showed" "paid 3.0" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 3 m21.ALICE))
+(expect "A-21f alice stands where she started; bob is short only his R1 stake, which A-22 finds locked" [100000.0 99999.0] [(coin.get-balance m21.ALICE) (coin.get-balance m21.BOBBY)])
+(expect "A-21g R3 owes nothing" 0.0 (at 'liability (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 3)))
+(commit-tx)
+(begin-tx)
+(expect-failure "A-21h R3's genuine beacon, arriving now, cannot settle it: a refunded round takes no beacon"
+  "this round is already settled (resolved or void)"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.resolve 3 m21.SIG172))
+(rollback-tx)
+
+;; ---- A-22 R1: the record passed its beacon and its beacon never comes ---------
+(begin-tx)
+(expect "A-22 CONTROL the grace has elapsed for R1 as well" true
+  (> (diff-time (at 'block-time (chain-data)) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.time-of-round 20801768)) n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.VOID-AFTER))
+(expect-failure "A-22a R1 cannot be refunded: the record is above its beacon"
+  "drand has been seen since this round"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.void-round 1))
+(rollback-tx)
+(begin-tx)
+(expect-failure "A-22b nor settled from any other beacon" "drand signature does not verify" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.resolve 1 m21.SIG59))
+(rollback-tx)
+(begin-tx)
+(expect-failure "A-22c nor claimed" "this round has not been settled yet" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 1 m21.BOBBY))
+(rollback-tx)
+(begin-tx)
+(expect "A-22d what R1 holds stays locked: its reserve 40 + fee, beside R2's 120" true
+  (and (= "open" (at 'state (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)))
+       (= (m21.reserved) (+ (at 'reserve (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)) (at 'liability (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 2))))))
+(expect "A-22e bob's stake is in the pot and not in his hands" 99999.0 (coin.get-balance m21.BOBBY))
+(commit-tx)
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(expect-failure "A-22f and the house cannot reach one unit of it"
+  "exceeds unreserved balance"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.withdraw-house (+ (m21.available) 0.000000000001)))
+(rollback-tx)
+(env-sigs [])
+;; CONTROL: the lock is the missing beacon and nothing else -- with it, R1 settles
+(begin-tx)
+(expect "A-22g CONTROL R1's own beacon, whenever it comes, settles it"
+  56545452692137916206939125878563714591712448824066966980554332813224754431541
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.resolve 1 m21.SIG68))
+(expect "A-22h and bob's board, [56 58 22], did not win" "settled: nothing to claim, this board did not win" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 1 m21.BOBBY))
+(commit-tx)
+
+;; ---- A-23 ten years on: R2's winnings are still mallory's ---------------------
+(begin-tx)
+(expect "A-23 PRECONDITION only R2's unclaimed board is still owed: 120 = 40 x 3" [120.0 120.0]
+  [(m21.reserved) (at 'liability (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 2))])
+(commit-tx)
+(env-chain-data { "block-time": (time "2036-09-20T18:01:00Z") })
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(expect "A-23a ten years later the same 120 is still reserved: nothing swept it" 120.0 (m21.reserved))
+(expect-failure "A-23b the house cannot withdraw one unit of it"
+  "exceeds unreserved balance"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.withdraw-house (+ (m21.available) 0.000000000001)))
+(rollback-tx)
+(begin-tx)
+(expect "A-23c the house takes everything ELSE" "house withdrawal complete" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.withdraw-house (m21.available)))
+(expect "A-23d leaving the pot at exactly what mallory's board may still take" 120.0 (m21.pot))
+(commit-tx)
+(env-sigs [])
+(begin-tx)
+(expect "A-23e and her claim pays 5.0, a decade late, from a pot the house emptied around it" "paid 5.000000000000" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 2 m21.MALLORY))
+(expect "A-23f mallory holds 100,000 - 3 + 5" 100002.0 (coin.get-balance m21.MALLORY))
+(expect "A-23g and nothing is owed to anyone any more" 0.0 (m21.reserved))
+(commit-tx)
+
+(print "slots attack suite complete: every attack above FAILED, as required")

@@ -1,0 +1,52 @@
+;; slots-pin-must-fail.repl — THIS FILE MUST EXIT 1.
+;;
+;; It is an INVERTED CONTROL, not a test. It plants an impostor module under the
+;; name `n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand` whose `verified-seed`
+;; accepts any signature and returns a seed the attacker chooses -- and with it
+;; every reel stop -- then tries to load slots against it. Loading must fail with:
+;;
+;;   Import error for module n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand , hash not blessed: <impostor hash>
+;;
+;; If this file ever exits 0, the beacon verifier can be swapped for one that
+;; hands out chosen reels, and every other suite would stay green while it
+;; happened. Score it by EXIT CODE and require 1 -- never by grepping output.
+;;
+;; PATHS ARE RELATIVE, AND THAT IS THE POINT: relative loads resolve against THIS
+;; file's directory, so the row always reports on the tree it was run from.
+
+(begin-tx)
+(module test-ns GOVERNANCE
+  (defcap GOVERNANCE () (enforce false "fixture"))
+  (defconst NS-GUARD (create-user-guard (succeed)))
+  (defun succeed () true))
+(define-namespace "n_48867b242317a0216a67f8c7ca26696b5878e0e3" test-ns.NS-GUARD test-ns.NS-GUARD)
+(define-namespace "smartpacts" test-ns.NS-GUARD test-ns.NS-GUARD)
+(define-namespace "free"       test-ns.NS-GUARD test-ns.NS-GUARD)
+(commit-tx)
+(begin-tx)
+(load "../vendor/fixtures/fungible-v2.pact")
+(load "../vendor/fixtures/fungible-xchain-v1.pact")
+(load "../vendor/fixtures/coin.pact")
+(create-table coin.coin-table)
+(create-table coin.allocation-table)
+(commit-tx)
+(begin-tx)
+(namespace "n_48867b242317a0216a67f8c7ca26696b5878e0e3")
+(module drand G
+  (defcap G () (enforce false "impostor"))
+  ;; every beacon "verifies", and the seed -- so every reel stop -- is the attacker's
+  (defun verified-seed:integer (rkey:string rnd:integer sig-hex:string) 0)
+  (defun round-at:integer (t:time) 1)
+  (defun time-of-round:time (rnd:integer) (time "2026-01-01T00:00:00Z")))
+(commit-tx)
+(env-data { "gov-admin": { "keys": ["476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef"], "pred": "keys-all" } })
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(namespace "n_48867b242317a0216a67f8c7ca26696b5878e0e3")
+(define-keyset "n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-gov" (read-keyset "gov-admin"))
+(commit-tx)
+(begin-tx)
+;; MUST FAIL: the hash pin does not match the impostor
+(load "../modules/slots.pact")
+(commit-tx)
+(print "REACHED THE END -- THE PIN DID NOT BITE")

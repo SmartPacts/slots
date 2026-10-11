@@ -1,0 +1,99 @@
+# game-crank.service — a TEMPLATE. provision-game-crank.sh renders it into
+# /etc/systemd/system/@GAME@-crank.service, replacing @GAME@ with the game's short name and @MOD@
+# with its module; it is never installed as it stands. With GAME=roulette the rendered unit has the
+# unit name, user, paths and key file of roulette-crank.service.
+#
+# The crank resolves each round from the drand beacon once it is published, keeps the module's
+# liveness record current, and pays every winner and every refund. One unit per game: each has its
+# own user, key, settings file and heartbeat, so one table's failure is never another's.
+#
+# Modelled line for line on prize-draw-crank.service, itself modelled on block-history-feeder.service,
+# which runs this shape on a live host. Install it, but DO NOT enable it here:
+# ENABLING IT STARTS SENDING MAINNET TRANSACTIONS, so that step belongs to the operator, after the
+# module is deployed and the crank's account is funded:
+#   systemctl enable --now @GAME@-crank
+#   journalctl -u @GAME@-crank -f
+#
+# Started with no KDA on the key it is harmless: the startup check refuses mainnet and it exits
+# without sending anything. Started FUNDED but before the module is deployed it does not exit — it
+# logs "pot-status unavailable", then "pass failed" every poll, sending nothing and reading the node
+# every 15 s — so enable it when the module is there, not before.
+#
+# WHAT THIS PROCESS CAN AND CANNOT DO. Every call it makes is permissionless — `resolve`,
+# `prove-liveness`, `claim`. It holds no operator or admin authority, cannot choose an outcome, cannot
+# pick who wins, and cannot move money anywhere the contract would not send it anyway: `claim` pays
+# the board's own account whoever sends it, and the resolve fee goes to SPT's treasury inside the
+# contract. It earns nothing. A stolen crank key costs exactly what its account holds, which is the
+# gas it was funded with — under 1 KDA a year at a busy table — and nothing else.
+
+[Unit]
+Description=@GAME@ crank (resolves rounds from the drand beacon, proves liveness, pays every winner)
+After=network-online.target
+Wants=network-online.target
+# A persistent misconfiguration (an unfunded key, a key file the interlocks refuse) makes the crank
+# exit at startup. Without a limit systemd would restart it forever and hammer the public node with
+# reads. Five failed starts in 30 minutes stops it until someone looks.
+StartLimitIntervalSec=1800
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=@GAME@
+Group=@GAME@
+# The code is root's; the service can only READ it, so a compromised crank cannot rewrite what it
+# runs. The only thing the service user owns is its key directory, /etc/@GAME@.
+WorkingDirectory=/opt/@GAME@-crank
+Environment=NODE_ENV=production
+# The game's name labels the log; the module below is what the crank actually works.
+Environment=GAME=@GAME@
+# MAINNET INTERLOCKS. game-crank.mjs refuses to touch mainnet unless every one of these is set
+# deliberately; none of them has a default that could be inherited from a devnet session.
+Environment=CRANK_MAINNET=armed
+Environment=CRANK_NETWORK=mainnet01
+Environment=CRANK_HOST=https://chainweb.eckowallet.com
+Environment=CRANK_CHAIN=2
+# The PRODUCTION module, named explicitly: game-crank.mjs has no default module, so a process can
+# never fall back to another game's table. A devnet module name (free.…) can only reach this
+# service by being set on purpose in /etc/@GAME@/crank.env.
+Environment=CRANK_MOD=@MOD@
+# The key file lives OUTSIDE the checkout, and that is enforced: game-crank.mjs refuses a key
+# file anywhere under the directory it runs from (/opt/@GAME@-crank), so the key lives in /etc,
+# not /opt. It must be the flat shape {account, publicKey, secretKey} that crank-keygen.mjs writes.
+Environment=CRANK_BOT_KEY=/etc/@GAME@/crank-key.json
+# Pace. POLL_MS (15 s) and LIVENESS_MS (6 h) are left at the script's defaults: a pass is a handful
+# of reads, a round resolves once its beacon is published, and the liveness send is driven by the
+# age of the ON-CHAIN record, which the 6 h refresh keeps ~360x inside the module's 90-day window.
+
+# YOUR SETTINGS GO IN A FILE, NOT IN THIS UNIT. Everything above is a shipped
+# default that an update overwrites; /etc/@GAME@/crank.env is yours and is
+# never touched by an update. systemd documents these as overriding Environment=
+# above whatever the order, so anything you put there wins.
+#   HEARTBEAT_URL=https://… a ping URL that alerts when the pings STOP
+# There is no payee to set: this bot earns nothing, and its account holds gas alone.
+# The leading `-` means the unit still starts when the file does not exist.
+EnvironmentFile=-/etc/@GAME@/crank.env
+ExecStart=/usr/local/bin/node game-crank.mjs
+Restart=always
+RestartSec=30
+# A leak must not take the whole machine down with it. roulette-crank.mjs, which game-crank.mjs
+# generalises without changing its state, measured 37 MB RSS (46 MB peak) on a live host; the cap
+# is 120M, about 2.6 times that peak. Past it systemd kills and restarts the crank
+# (RestartSec=30) instead of letting the box swap itself to a standstill.
+MemoryMax=120M
+
+# The crank holds a hot key with a gas balance and nothing else. Unprivileged user; the file system
+# is read-only to it. It never needs to write its key, so it cannot alter it.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+# Deliberately NOT set: MemoryDenyWriteExecute, which breaks V8's JIT.
+
+[Install]
+WantedBy=multi-user.target

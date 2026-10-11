@@ -1,0 +1,16 @@
+;; drand-test-init.repl — the minimum environment n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand needs.
+;; The module is sealed (governance is `enforce false`) and holds no tables, so
+;; there is nothing to create and no keyset to define: only the namespace.
+(begin-tx)
+(module drand-test-ns GOVERNANCE
+  (defcap GOVERNANCE () (enforce false "test fixture - not upgradeable"))
+  (defconst NS-GUARD (create-user-guard (succeed)))
+  (defun succeed () true))
+(define-namespace "n_48867b242317a0216a67f8c7ca26696b5878e0e3" drand-test-ns.NS-GUARD drand-test-ns.NS-GUARD)
+(define-namespace "free" drand-test-ns.NS-GUARD drand-test-ns.NS-GUARD)
+(commit-tx)
+
+(begin-tx)
+(load "../modules/drand.pact")
+(commit-tx)
+(print "drand test environment ready")

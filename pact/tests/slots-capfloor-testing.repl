@@ -1,0 +1,1378 @@
+;; slots-capfloor-testing.repl — the TABLE LIMIT's two operands, pinned, for spin boards.
+;;
+;; The cap is `f0 * min(available, a0)`. Every part of that expression is
+;; load-bearing: `a0` frozen at open stops funding from widening a table already
+;; in play, and `available` stops a withdrawal from leaving a round sized against
+;; money that has gone. Each operand gets a refusal that only it can produce.
+;;
+;;   CF-1  the DENOMINATOR disappears (withdrawal mid-round)  -> `available` binds
+;;   CF-2  the DENOMINATOR grows      (funding mid-round)     -> `a0` binds
+;;   CF-3  what `pot-status` ADVERTISES in max-stakes is a board TOTAL `bet` takes,
+;;         and one unit of the last decimal more is refused -- on an empty round and
+;;         a round holding boards, at a fee scale below 1 and at 1 (classic machine)
+;;   CF-4  `a0` is the pot minus what an earlier, unsettled round still owes
+;;   CF-5  below the table minimum nothing is advertised
+;;   CF-6  at share 1.0 the whole spare pot is the cap, and the SECOND enforce in
+;;         `bet` ("the pot cannot cover this bet") stays unreachable
+;;   CF-8  the minimum is PER SPIN, never per board total
+;;   CF-9  max-stakes is exact on EVERY machine: empty table and a round holding
+;;         other machines' boards, scale below 1 and at 1, and the next-unit branch
+;;   CF-10 a board plays one machine: a two-machine board is refused by
+;;         its count before the limit is looked at, two boards that each fit their own
+;;         max-stakes are refused together, and max-stakes stays exact beside another
+;;         board
+;;
+;; Every probe asserts its own preconditions before the refusal, so a refusal
+;; cannot pass for the wrong reason: inside the reverted cap, outside the live one,
+;; and inside solvency. A slots board reserves its machine's maximum times its
+;; whole total, and a board's total is stake x spins. CF-1 .. CF-8 and the GAP
+;; worlds play the classic machine (id 0, 40x) with ONE spin and with TWENTY spins,
+;; and read max-stakes at index 0; CF-9 covers all six machines. Every
+;; write-capable refusal sits in its own rolled-back transaction.
+
+(load "slots-test-init.repl")
+
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.initialize n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT 100000.0)
+(commit-tx)
+(env-sigs [{"key":"h0u5e00000000000000000000000000000000000000000000000000000000004"
+           ,"caps":[(coin.TRANSFER "house-funder" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 50000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.fund-house "house-funder" 50000.0)
+(commit-tx)
+(env-sigs [])
+
+(begin-tx)
+(module cfh GOV (defcap GOV () (enforce true "ok"))
+  (defconst ALICE "k:a11ce00000000000000000000000000000000000000000000000000000000001")
+  (defconst BOBBY "k:b0b0000000000000000000000000000000000000000000000000000000000002")
+  (defconst CAROL "k:ca40100000000000000000000000000000000000000000000000000000000003")
+  (defun ps:object () (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status))
+  (defun params:object () (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params))
+  (defun cur-round:object ()
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round (at 'current (params))))
+  ;; a board on the classic machine (id 0, 40x): stake per spin, spins
+  (defun w:object (stake:decimal spins:integer) { "entries": [ { "machine": 0, "stake": stake, "spins": spins } ] })
+  ;; what the round's table limit measures if a board of total `total` joins round
+  ;; `r`: exposure + 40 x total + every fee. Built from the module's own fee function
+  ;; because it only POSITIONS a probe; the refusal is always `bet`'s own.
+  (defun charge:decimal (r:object total:decimal scale:decimal)
+    (+ (+ (at 'exposure r) (at 'fee-owed r))
+       (+ (* 40.0 total) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.fee-for 0 total scale))))
+  ;; the stake per spin of a `spins`-spin board whose charge lands just BELOW
+  ;; `target`: 40.05 per unit over-estimates 40 + the whole edge (0.04)
+  (defun solve:decimal (target:decimal r:object spins:integer)
+    (floor (/ (/ (- target (+ (at 'exposure r) (at 'fee-owed r))) 40.05) (dec spins)) 12)))
+(commit-tx)
+
+;; ============================================================================
+;; CF-3 (empty round)  WHAT pot-status PUBLISHES, ON A TABLE WITH NO ROUND OPEN.
+;;   Nothing is open, so max-stakes[0] is the share of the whole spare pot per unit of
+;;   40 plus the fee. The pot is 50,000 against a target of 100,000, so the fee
+;;   scale is 0.5 here. The advertised TOTAL is placed as one spin and accepted;
+;;   one unit of the twelfth decimal more is refused by the table limit.
+;; ============================================================================
+(env-chain-data { "block-time": (time "2027-02-01T00:00:00Z") })
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}
+          ,{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER cfh.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 100000.0)]}])
+(begin-tx)
+(let* ((p (cfh.ps)) (advert (at 0 (at 'max-stakes p))))
+  (expect "CF-3a PRECONDITION no round is open yet" 0 (at 'current (cfh.params)))
+  (expect "CF-3a1 PRECONDITION the fee scale is 0.5 (50,000 of a 100,000 target)" 0.5 (at 'fee-scale-now p))
+  ;; VALUE: floor(0.02 x 50000 / (40 + 0.5 x 0.0400390625), 12), computed in Python
+  ;; with decimal.Decimal (prec 200, ROUND_FLOOR at 1e-12)
+  (expect "CF-3a2 the advertised maximum on an empty table" 24.987494052049 advert)
+  (expect "CF-3b the advertised maximum, as ONE spin, is accepted verbatim" "bet placed in round 1"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet cfh.ALICE (cfh.w advert 1)))
+  (expect "CF-3b1 and it filled the table to within one unit of the last decimal" true
+    (let ((r (cfh.cur-round)))
+      (and (<= (+ (at 'exposure r) (at 'fee-owed r)) 1000.0)
+           (> (+ (at 'exposure r) (at 'fee-owed r)) (- 1000.0 0.00000000005))))))
+(rollback-tx)
+(begin-tx)
+(let ((advert (at 0 (at 'max-stakes (cfh.ps)))))
+  (expect-failure "CF-3c one unit of the last decimal above the advert is refused by the table limit"
+    "would exceed the table limit"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet cfh.ALICE (cfh.w (+ advert 0.000000000001) 1))))
+(rollback-tx)
+;; the same at a fee scale of 1: the target is lowered under the pot, so the whole
+;; edge is charged. The dial is set inside each probe's own rolled-back transaction.
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.set-params 0.02 0.01 1000.0 30.0 120.0)
+(let* ((p (cfh.ps)) (advert (at 0 (at 'max-stakes p))))
+  (expect "CF-3d PRECONDITION the fee scale is 1.0" 1.0 (at 'fee-scale-now p))
+  ;; VALUE: floor(1000 / 40.0400390625, 12), Python decimal.Decimal
+  (expect "CF-3d1 the advertised maximum at scale 1" 24.975000609741 advert)
+  (expect "CF-3d2 accepted verbatim as one spin" "bet placed in round 1"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet cfh.ALICE (cfh.w advert 1))))
+(rollback-tx)
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.set-params 0.02 0.01 1000.0 30.0 120.0)
+(let ((advert (at 0 (at 'max-stakes (cfh.ps)))))
+  (expect-failure "CF-3d3 one unit of the last decimal more is refused by the table limit"
+    "would exceed the table limit"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet cfh.ALICE (cfh.w (+ advert 0.000000000001) 1))))
+(rollback-tx)
+(env-sigs [])
+
+;; ============================================================================
+;; CF-8  THE MINIMUM IS PER SPIN, NOT PER BOARD.
+;;   A board of twenty spins at 0.01 totals 0.2, twenty times the minimum, but the
+;;   rule reads the stake of each spin: twenty spins at exactly 0.01 are accepted,
+;;   twenty spins one unit of the last decimal under it are refused, although
+;;   their total (0.19999999998) is far above 0.01.
+;; ============================================================================
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER cfh.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 100000.0)]}])
+(begin-tx)
+(expect "CF-8a PRECONDITION the table minimum is 0.01" 0.01 (at 'min-bet (cfh.ps)))
+(expect "CF-8b twenty spins at exactly the minimum are accepted" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet cfh.ALICE (cfh.w 0.01 20)))
+(expect "CF-8b1 and the board's total is 0.2" 0.2
+  (at 'total (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 cfh.ALICE)))
+(rollback-tx)
+(begin-tx)
+(expect "CF-8c PRECONDITION the refused board's TOTAL is far above the minimum" true
+  (> (* 0.009999999999 20.0) 0.01))
+(expect-failure "CF-8d twenty spins one unit under the minimum are refused, per spin"
+  "stake per spin below the table minimum"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet cfh.ALICE (cfh.w 0.009999999999 20)))
+(rollback-tx)
+(begin-tx)
+(expect "CF-8e CONTROL one spin at exactly the minimum is accepted too" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet cfh.ALICE (cfh.w 0.01 1)))
+(rollback-tx)
+(env-sigs [])
+
+;; ============================================================================
+;; THE STANDING ROUND. Alice opens round 1 with twenty spins at 0.5: total 10.0,
+;; exposure 400, fee floor(0.5 x 0.0400390625 x 10, 12) = 0.2001953125, against a
+;; cap of 0.02 x 50000 = 1000, about 40% of it.
+;; ============================================================================
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER cfh.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 100000.0)]}])
+(begin-tx)
+(expect "the standing board opens round 1" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet cfh.ALICE (cfh.w 0.5 20)))
+(commit-tx)
+(env-sigs [])
+
+(begin-tx)
+(expect "CF-1a the round froze the pot as it stood at open" 50000.0 (at 'avail-at-open (cfh.cur-round)))
+(expect "CF-1a1 the standing exposure is 40 x 10.0" 400.0 (at 'exposure (cfh.cur-round)))
+(expect "CF-1a2 the standing fee is 0.2001953125" 0.2001953125 (at 'fee-owed (cfh.cur-round)))
+(commit-tx)
+
+;; ============================================================================
+;; CF-3 (a round holding boards)  the advert is the open round's headroom:
+;;   cap - (exposure + fee-owed), per unit of 40 plus the fee, at scale 0.5 and 1.
+;; ============================================================================
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}
+          ,{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER cfh.BOBBY (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 100000.0)]}])
+(begin-tx)
+(let* ((p (cfh.ps)) (advert (at 0 (at 'max-stakes p))))
+  (expect "CF-3e PRECONDITION the fee scale is below 1" true (< (at 'fee-scale-now p) 1.0))
+  ;; VALUE: Alice's reserve took the unreserved pot to 49609.7998046875, BELOW a0, so
+  ;; the cap is 0.02 x 49609.7998046875 = 992.19599609375; the advert is
+  ;; floor((992.19599609375 - 400.2001953125) / (40 + 0.496097998046 x 0.0400390625), 12)
+  ;; with the scale floor(49609.7998046875 / 100000, 12), Python decimal.Decimal
+  (expect "CF-3e1 the advertised maximum is the open round's headroom" 14.792549298881 advert)
+  (expect "CF-3f the advert is accepted verbatim into the round holding Alice's board" "bet placed in round 1"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet cfh.BOBBY (cfh.w advert 1)))
+  (expect "CF-3f1 the round now holds two boards" 2 (at 'boards (cfh.cur-round))))
+(rollback-tx)
+(begin-tx)
+(let ((advert (at 0 (at 'max-stakes (cfh.ps)))))
+  (expect-failure "CF-3g one unit of the last decimal more is refused by the table limit"
+    "would exceed the table limit"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet cfh.BOBBY (cfh.w (+ advert 0.000000000001) 1))))
+(rollback-tx)
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.set-params 0.02 0.01 1000.0 30.0 120.0)
+(let* ((p (cfh.ps)) (advert (at 0 (at 'max-stakes p))))
+  (expect "CF-3h PRECONDITION the fee scale is 1.0" 1.0 (at 'fee-scale-now p))
+  ;; VALUE: floor((992.19599609375 - 400.2001953125) / 40.0400390625, 12), Python decimal.Decimal
+  (expect "CF-3h0 the advertised maximum at scale 1, mid-round" 14.785095485475 advert)
+  (expect "CF-3h1 at scale 1 the advert is accepted verbatim into the round" "bet placed in round 1"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet cfh.BOBBY (cfh.w advert 1))))
+(rollback-tx)
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.set-params 0.02 0.01 1000.0 30.0 120.0)
+(let ((advert (at 0 (at 'max-stakes (cfh.ps)))))
+  (expect-failure "CF-3h2 at scale 1 one unit more is refused by the table limit"
+    "would exceed the table limit"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet cfh.BOBBY (cfh.w (+ advert 0.000000000001) 1))))
+(rollback-tx)
+(env-sigs [])
+
+;; ============================================================================
+;; CF-1  THE DENOMINATOR DISAPPEARING.
+;;   `a0` is frozen at open so a later set-params cannot widen the numerator. It
+;;   does nothing about the pot itself leaving: with a round open, an admin
+;;   withdrawal leaves a stranger free to size a board against money that is gone,
+;;   unless the cap also reads `available`. The pot is taken down to 30,000
+;;   unreserved: the live cap 600 is still above the standing 400.2, so a board
+;;   can sit between the two caps.
+;; ============================================================================
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.withdraw-house (- (at 'available (cfh.ps)) 30000.0))
+(commit-tx)
+(env-sigs [])
+
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER cfh.BOBBY (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 100000.0)]}])
+(begin-tx)
+(let* ( (r     (cfh.cur-round))
+        (a0    (at 'avail-at-open r))
+        (f0    (at 'frac-at-open r))
+        (p     (cfh.ps))
+        (now   (at 'available p))
+        (scale (at 'fee-scale-now p))
+        ;; the midpoint of the two caps: strictly above the live one, strictly below
+        ;; the reverted one, by construction
+        (target (* f0 (* 0.5 (+ now a0))))
+        (stake (cfh.solve target r 1))
+        (charged (cfh.charge r stake scale)) )
+  (expect "CF-1b the pot really did shrink below what the round opened against" [30000.0 true] [now (< now a0)])
+  (expect "CF-1c [1 spin] the probe board is INSIDE the reverted cap f0*a0" true (< charged (* f0 a0)))
+  (expect "CF-1d [1 spin] the probe board is OUTSIDE the live cap f0*min(available,a0)" true (> charged (* f0 now)))
+  ;; if this failed, the refusal below could be solvency talking, not the cap
+  (expect "CF-1e [1 spin] solvency is NOT what refuses it: the pot covers this board" true (< charged now))
+  (expect-failure "CF-1f [1 spin] the table limit refuses a board sized against a pot that left"
+    "would exceed the table limit"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet cfh.BOBBY (cfh.w stake 1))))
+(rollback-tx)
+(begin-tx)
+(let* ( (r (cfh.cur-round)) (a0 (at 'avail-at-open r)) (f0 (at 'frac-at-open r))
+        (p (cfh.ps)) (now (at 'available p)) (scale (at 'fee-scale-now p))
+        (target (* f0 (* 0.5 (+ now a0))))
+        (stake (cfh.solve target r 20))
+        (charged (cfh.charge r (* stake 20.0) scale)) )
+  (expect "CF-1g [20 spins] the probe board is INSIDE the reverted cap" true (< charged (* f0 a0)))
+  (expect "CF-1h [20 spins] and OUTSIDE the live cap" true (> charged (* f0 now)))
+  (expect "CF-1i [20 spins] and the pot covers it" true (< charged now))
+  (expect-failure "CF-1j [20 spins] the table limit refuses it"
+    "would exceed the table limit"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet cfh.BOBBY (cfh.w stake 20))))
+(rollback-tx)
+;; the accept side of the same boundary: what pot-status advertises now is sized on
+;; the LIVE cap, and is taken; one unit more is not
+(begin-tx)
+(let* ((p (cfh.ps)) (advert (at 0 (at 'max-stakes p))) (r (cfh.cur-round)))
+  (expect "CF-1k CONTROL the advert is sized on the live cap f0*available, not f0*a0" true
+    (< (+ (* 40.0 advert) (+ (at 'exposure r) (at 'fee-owed r))) (* (at 'frac-at-open r) (at 'available p))))
+  (expect "CF-1l the live-cap advert is accepted verbatim" "bet placed in round 1"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet cfh.BOBBY (cfh.w advert 1))))
+(rollback-tx)
+(begin-tx)
+(let ((advert (at 0 (at 'max-stakes (cfh.ps)))))
+  (expect-failure "CF-1m one unit of the last decimal above the live-cap advert is refused"
+    "would exceed the table limit"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet cfh.BOBBY (cfh.w (+ advert 0.000000000001) 1))))
+(rollback-tx)
+(env-sigs [])
+
+;; ============================================================================
+;; CF-2  THE DENOMINATOR GROWING. The mirror image, and the reason the
+;;   expression is min() and not simply `available`: funding the pot mid-round
+;;   must not retroactively widen a table that players already sat down at.
+;; ============================================================================
+(env-sigs [{"key":"h0u5e00000000000000000000000000000000000000000000000000000000004"
+           ,"caps":[(coin.TRANSFER "house-funder" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 90000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.fund-house "house-funder" 90000.0)
+(commit-tx)
+(env-sigs [])
+
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER cfh.BOBBY (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 100000.0)]}])
+(begin-tx)
+(let* ( (r (cfh.cur-round)) (a0 (at 'avail-at-open r)) (f0 (at 'frac-at-open r))
+        (p (cfh.ps)) (now (at 'available p)) (scale (at 'fee-scale-now p))
+        (target (* f0 (* 0.5 (+ now a0))))
+        (stake (cfh.solve target r 1))
+        (charged (cfh.charge r stake scale)) )
+  (expect "CF-2a the pot is now LARGER than what the round opened against" [120000.0 true] [now (> now a0)])
+  (expect "CF-2b [1 spin] the probe board is OUTSIDE the frozen cap f0*a0" true (> charged (* f0 a0)))
+  (expect "CF-2c [1 spin] but INSIDE what a live-`available` cap would have allowed" true (< charged (* f0 now)))
+  (expect-failure "CF-2d [1 spin] funding mid-round does not widen a table already in play"
+    "would exceed the table limit"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet cfh.BOBBY (cfh.w stake 1))))
+(rollback-tx)
+(begin-tx)
+(let* ( (r (cfh.cur-round)) (a0 (at 'avail-at-open r)) (f0 (at 'frac-at-open r))
+        (p (cfh.ps)) (now (at 'available p)) (scale (at 'fee-scale-now p))
+        (target (* f0 (* 0.5 (+ now a0))))
+        (stake (cfh.solve target r 20))
+        (charged (cfh.charge r (* stake 20.0) scale)) )
+  (expect "CF-2e [20 spins] OUTSIDE the frozen cap" true (> charged (* f0 a0)))
+  (expect "CF-2f [20 spins] INSIDE a live-`available` cap" true (< charged (* f0 now)))
+  (expect-failure "CF-2g [20 spins] refused by the table limit"
+    "would exceed the table limit"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet cfh.BOBBY (cfh.w stake 20))))
+(rollback-tx)
+;; the accept side: the advert is sized on the frozen a0 and is taken; one unit more is not
+(begin-tx)
+(let* ((p (cfh.ps)) (advert (at 0 (at 'max-stakes p))))
+  ;; VALUE: floor((0.02 x 50000 - 400.2001953125) / 40.0400390625, 12) = 14.980000487792 leaves
+  ;; 4.0e-11 of room (Python decimal.Decimal), and `bet` floors the fee, so the next unit still
+  ;; fits: the view tries it against the same inequality and publishes 14.980000487793
+  (expect "CF-2h the advert is the frozen cap's headroom, at scale 1, exact" 14.980000487793 advert)
+  (expect "CF-2i and it is accepted verbatim" "bet placed in round 1"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet cfh.BOBBY (cfh.w advert 1))))
+(rollback-tx)
+;; THE EXACTNESS PIN. floor(room / (40 + scale x edge), 12) alone would publish
+;; 14.980000487792 here: the room left is 599.7998046875 at scale 1, that figure leaves
+;; 4.0e-11 of slack, and one unit more adds 40 x 1e-12 of exposure and 0 of fee (the
+;; floored fee does not move), so a view that only floored the quotient would sit one
+;; unit BELOW the largest board `bet` takes. This block went RED against exactly that
+;; view; `pot-status` now tries the next unit against `bet`'s own inequality, so the
+;; published figure is the maximum and one unit more is refused.
+(begin-tx)
+(let ((advert (at 0 (at 'max-stakes (cfh.ps)))))
+  (expect-failure "CF-2j one unit of the last decimal more is refused by the table limit"
+    "would exceed the table limit"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet cfh.BOBBY (cfh.w (+ advert 0.000000000001) 1))))
+(rollback-tx)
+(begin-tx)
+(let ((advert (at 0 (at 'max-stakes (cfh.ps)))))
+  (expect-failure "CF-2k two units of the last decimal above the advert are refused by the table limit"
+    "would exceed the table limit"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet cfh.BOBBY (cfh.w (+ advert 0.000000000002) 1))))
+(rollback-tx)
+(env-sigs [])
+
+;; ============================================================================
+;; CF-4  `avail-at-open` IS THE POT MINUS WHAT EARLIER ROUNDS STILL OWE
+;;   Every round freezes the UNRESERVED pot, balance minus reserved. Taking the raw
+;;   balance instead hands a new round a cap sized on money already promised to the
+;;   rounds before it. The two separate only while an EARLIER round is unsettled:
+;;   round 1 is closed to bets, unresolved, and still holds its reserve.
+;; ============================================================================
+(env-chain-data { "block-time": (time "2027-02-01T00:05:00Z") })
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER cfh.BOBBY (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 100000.0)]}
+          ,{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER cfh.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 100000.0)]}
+          ,{"key":"h0u5e00000000000000000000000000000000000000000000000000000000004"
+           ,"caps":[(coin.TRANSFER "house-funder" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 200000.0)]}])
+(begin-tx)
+(let* ( (bal0 (coin.get-balance (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account)))
+        (res0 (at 'reserved (cfh.params)))
+        (r1   (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1))
+        ;; opening the second round is the act under test
+        (opened (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet cfh.BOBBY (cfh.w 1.0 1)))
+        (seq  (at 'current (cfh.params)))
+        (r2   (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round seq)) )
+  (expect "CF-4a round 1 really is still unsettled" "open" (at 'state r1))
+  (expect "CF-4a1 and it still holds reserve 400.2001953125, so the two expressions differ" 400.2001953125 res0)
+  (expect "CF-4a2 the second round is a NEW round, not a join" ["bet placed in round 2" 2] [opened seq])
+  ;; THE PIN, read from the two live values
+  (expect "CF-4b avail-at-open is the pot MINUS what round 1 still owes" (- bal0 res0) (at 'avail-at-open r2))
+  (expect "CF-4b1 which is strictly less than the raw balance" true (< (at 'avail-at-open r2) bal0))
+
+  ;; and the consequence, sized so only the difference between the two decides it
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.fund-house "house-funder" 200000.0)
+  (let* ( (p        (cfh.ps))
+          (now      (at 'available p))
+          (scale    (at 'fee-scale-now p))
+          (f0       (at 'frac-at-open r2))
+          (r2now    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round seq))
+          (true-cap (* f0 (if (< now (- bal0 res0)) now (- bal0 res0))))
+          (raw-cap  (* f0 (if (< now bal0) now bal0)))
+          ;; three quarters of the way across the gap (f0 x 400.2 = 8.004 wide)
+          (target   (+ true-cap (* 0.75 (- raw-cap true-cap))))
+          ;; exact per-unit charge at this scale, since the window is narrow
+          (stake    (floor (/ (- target (+ (at 'exposure r2now) (at 'fee-owed r2now)))
+                              (+ 40.0 (* scale 0.0400390625))) 12))
+          (charged  (cfh.charge r2now stake scale)) )
+    (expect "CF-4c the pot was funded well past both caps, so `available` binds neither" true (> now bal0))
+    (expect "CF-4d the probe board is OUTSIDE the cap the round actually has" true (> charged true-cap))
+    (expect "CF-4e and INSIDE the cap a raw-balance `avail-at-open` would have given" true (< charged raw-cap))
+    (expect "CF-4f solvency is not what refuses it: the pot covers it many times over" true
+      (< (* 3.0 charged) now))
+    (expect-failure "CF-4g the table limit refuses a board sized on money round 1 already promised"
+      "would exceed the table limit"
+      (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet cfh.ALICE (cfh.w stake 1)))))
+;; bet opens the round and writes rows before the limit fires; a commit would keep them
+(rollback-tx)
+;; the accept side: the advert for round 2 is sized on the true a0, and is taken
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet cfh.BOBBY (cfh.w 1.0 1))
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.fund-house "house-funder" 200000.0)
+(let ((advert (at 0 (at 'max-stakes (cfh.ps)))))
+  (expect "CF-4h the advert on the true a0 is accepted verbatim" "bet placed in round 2"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet cfh.ALICE (cfh.w advert 1))))
+(rollback-tx)
+(env-sigs [])
+
+;; ============================================================================
+;; CF-5  BELOW THE TABLE MINIMUM, NOTHING IS ADVERTISED
+;;   max-stakes is what a front end sends. When the headroom per unit falls under
+;;   the table minimum, publishing it would send a board `bet` refuses on sight,
+;;   so the view publishes 0.0 instead. The branch exists only where
+;;   0.02 x available / 40.x < 0.01, i.e. below about 20.01 KDA unreserved; 10.0
+;;   sits inside it and 21.0 outside. No round is open (round 1 closed at 00:00:30).
+;; ============================================================================
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}
+          ,{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER cfh.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 100000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.withdraw-house (- (at 'available (cfh.ps)) 10.0))
+(let* ((p (cfh.ps))
+       (raw (floor (/ (* 0.02 (at 'available p)) (+ 40.0 (* (at 'fee-scale-now p) 0.0400390625))) 12)))
+  (expect "CF-5a the pot is down to 10 KDA unreserved" 10.0 (at 'available p))
+  (expect "CF-5a1 PRECONDITION no round is taking bets" true
+    (> (diff-time (at 'block-time (chain-data)) (at 'close-time (cfh.cur-round))) 0.0))
+  (expect "CF-5b the table minimum is 0.01" 0.01 (at 'min-bet p))
+  ;; VALUE: floor(0.2 / (40 + 0.0001 x 0.0400390625), 12), Python decimal.Decimal
+  (expect "CF-5c the raw headroom would be a real number under the minimum" 0.004999999499 raw)
+  (expect "CF-5d so nothing is published" 0.0 (at 0 (at 'max-stakes p)))
+  (expect-failure "CF-5e a board of the raw size is refused by the minimum"
+    "stake per spin below the table minimum"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet cfh.ALICE (cfh.w raw 1))))
+(rollback-tx)
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.withdraw-house (- (at 'available (cfh.ps)) 10.0))
+(expect-failure "CF-5f and a board at the minimum is refused by the table limit"
+  "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet cfh.ALICE (cfh.w 0.01 1)))
+(rollback-tx)
+;; the accept side: at 21 KDA the headroom clears the minimum, is published, and is taken
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.withdraw-house (- (at 'available (cfh.ps)) 21.0))
+(let ((advert (at 0 (at 'max-stakes (cfh.ps)))))
+  ;; VALUE: floor(0.42 / (40 + 0.00021 x 0.0400390625), 12), Python decimal.Decimal
+  (expect "CF-5g at 21 KDA a figure at or above the minimum is published" 0.010499997792 advert)
+  (expect "CF-5h and it is accepted verbatim" "bet placed in round 2"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet cfh.ALICE (cfh.w advert 1))))
+(rollback-tx)
+(env-sigs [])
+
+;; ============================================================================
+;; CF-6  AT THE WHOLE SPARE POT: THE SECOND ENFORCE IN `bet` IS UNREACHABLE.
+;;   `bet` checks two things. The table limit bounds exposure + fee against
+;;   f0 * min(available, a0); then "the pot cannot cover this bet" bounds what the
+;;   bet adds to the round's reserve, max(exposure, stake) + fee, against
+;;   `available`. In slots the second cannot fire:
+;;     (1) a board's exposure is 40 x its total >= its total, so for every round
+;;         exposure >= stake and the reserve is exposure + fee;
+;;     (2) the table limit then says reserve <= f0 * min(available, a0) <= available,
+;;         because the share is capped at 1.0;
+;;     (3) the round's prior reserve is >= 0, so what a bet ADDS is <= the whole new
+;;         reserve <= available.
+;;   What is pinned: at share 1.0 the boundary board is accepted with an added
+;;   reserve <= available, and one unit more is refused by the TABLE LIMIT, never by
+;;   the cover check -- on a fresh round and on a join.
+;; ============================================================================
+(env-chain-data { "block-time": (time "2027-02-01T00:10:00Z") })
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(expect "CF-6 the operator may set the share to the whole spare pot" "params set"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.set-params 1.0 0.01 100000.0 30.0 120.0))
+(commit-tx)
+(env-sigs [])
+
+(begin-tx)
+(module cf6x GX (defcap GX () (enforce true "ok"))
+  ;; place `w` for `who`; return what the bet added to `reserved` and the available
+  ;; pot it was measured against
+  (defun place:object (who:string w:object)
+    (let* ((res0 (at 'reserved (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params)))
+           (avail (at 'available (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status)))
+           (msg (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet who w))
+           (res1 (at 'reserved (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params))))
+      {"msg": msg, "added": (- res1 res0), "avail": avail})))
+(commit-tx)
+
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER cfh.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 100000.0)]}
+          ,{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER cfh.BOBBY (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 100000.0)]}])
+(begin-tx)
+(let* ((advert (at 0 (at 'max-stakes (cfh.ps))))
+       (o (cf6x.place cfh.ALICE (cfh.w advert 1)))
+       (r (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 2)))
+  (expect "CF-6a the share really is the whole spare pot" 1.0 (at 'frac-at-open r))
+  (expect "CF-6b the boundary board at the whole share is ACCEPTED" "bet placed in round 2" (at 'msg o))
+  (expect "CF-6c its reserve is exposure-driven: exposure >= stake" true (>= (at 'exposure r) (at 'stake r)))
+  (expect "CF-6d what it added to the reserve is covered by the available pot" true
+    (<= (at 'added o) (at 'avail o)))
+  (expect "CF-6e and it really is at the top: it used over 99.99% of the pot" true
+    (> (at 'added o) (* 0.9999 (at 'avail o)))))
+(rollback-tx)
+(begin-tx)
+(let ((advert (at 0 (at 'max-stakes (cfh.ps)))))
+  (expect-failure "CF-6f one unit more is refused by the TABLE LIMIT, not the cover check"
+    "would exceed the table limit"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet cfh.ALICE (cfh.w (+ advert 0.000000000001) 1))))
+(rollback-tx)
+;; a JOIN into a round that already holds reserve: Alice opens with twenty spins
+;; worth about half the share; Bob takes the advertised rest.
+(begin-tx)
+(let* ((half (floor (/ (/ (at 0 (at 'max-stakes (cfh.ps))) 2.0) 20.0) 12))
+       (o1 (cf6x.place cfh.ALICE (cfh.w half 20)))
+       (advert (at 0 (at 'max-stakes (cfh.ps))))
+       (o2 (cf6x.place cfh.BOBBY (cfh.w advert 1)))
+       (r (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 2)))
+  (expect "CF-6g Alice's half-share board opened the round" "bet placed in round 2" (at 'msg o1))
+  (expect "CF-6h Bob's advertised board JOINS a round that already holds reserve" "bet placed in round 2" (at 'msg o2))
+  (expect "CF-6i what Bob's bet added is covered by the available pot" true (<= (at 'added o2) (at 'avail o2)))
+  (expect "CF-6j the round's whole reserve is inside the pot it opened against" true
+    (<= (at 'reserve r) (at 'avail-at-open r))))
+(rollback-tx)
+(begin-tx)
+(let ((half (floor (/ (/ (at 0 (at 'max-stakes (cfh.ps))) 2.0) 20.0) 12)))
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet cfh.ALICE (cfh.w half 20))
+  (let ((advert (at 0 (at 'max-stakes (cfh.ps)))))
+    (expect-failure "CF-6k on the join, one unit more is refused by the table limit, not the cover check"
+      "would exceed the table limit"
+      (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet cfh.BOBBY (cfh.w (+ advert 0.000000000001) 1)))))
+(rollback-tx)
+(env-sigs [])
+
+;; ============================================================================
+;; GAP-4 .. GAP-6, GAP-12  pot-status AT ITS OWN EDGES, each on a fresh table
+;;   The probes above run on a 100,000 / 50,000 table. These four need a table of
+;;   an exact size, so each world below starts from a RESET harness
+;;   (`load ... true` drops every table and module above) and states its own
+;;   setup. Nothing after this point reads the cap-floor world.
+;; ============================================================================
+
+;; ---- world A: target 30,000, pot 15,000, alice's 20 x 0.1 opens round 1 ------
+(load "slots-test-init.repl" true)
+(begin-tx)
+(module gp GG (defcap GG () (enforce true "ok"))
+  (defconst ALICE "k:a11ce00000000000000000000000000000000000000000000000000000000001")
+  (defconst BOB   "k:b0b0000000000000000000000000000000000000000000000000000000000002"))
+(commit-tx)
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.initialize n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT 30000.0)
+(commit-tx)
+(env-sigs [{"key":"h0u5e00000000000000000000000000000000000000000000000000000000004"
+           ,"caps":[(coin.TRANSFER "house-funder" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 15000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.fund-house "house-funder" 15000.0)
+(commit-tx)
+(env-chain-data { "block-time": (time "2026-09-20T17:43:43Z") })
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER gp.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 2.0)]}])
+(begin-tx)
+(expect "GAP-A world A: alice opens round 1" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet gp.ALICE { "entries": [ { "machine": 0, "stake": 0.1, "spins": 20 } ] }))
+(commit-tx)
+
+;; GAP-4  `bet` keeps a round while t <= close-time (attacks A-12 CONTROL);
+;; pot-status repeats the comparison, and is read here at t == close-time.
+;; VALUES (Python decimal): available 14921.9599609375, scale 0.497398665364, cap
+;; 0.02 x available = 298.43919921875, used 80.0400390625, headroom per
+;; (40 + scale x 41/1024) = 5.457261918296.
+(env-chain-data { "block-time": (time "2026-09-20T17:44:13Z") })
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER gp.BOB (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 100.0)]}])
+(begin-tx)
+(expect "GAP-4 PRECONDITION the clock is exactly the close-time" (at 'close-time (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1))
+  (at 'block-time (chain-data)))
+(expect "GAP-4a at the close second the advert is still the OPEN round's headroom" 5.457261918296
+  (at 0 (at 'max-stakes (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status))))
+(expect "GAP-4b and bet takes it, into round 1" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet gp.BOB { "entries": [ { "machine": 0, "stake": 5.457261918296, "spins": 1 } ] }))
+(rollback-tx)
+(begin-tx)
+(expect-failure "GAP-4c one unit more is refused by the table limit"
+  "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet gp.BOB { "entries": [ { "machine": 0, "stake": 5.457261918297, "spins": 1 } ] }))
+(rollback-tx)
+(env-sigs [])
+
+;; GAP-5  attacks A-8 proves `bet` keeps the share a round opened under.
+;; pot-status repeats the expression; here max-stakes[0] is read in an open round whose
+;; frozen share differs from the row's. VALUES as GAP-4: the frozen 0.02 advertises
+;; 5.457261918296; a live 0.04 would advertise 12.914529041751.
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.set-params 0.04 0.01 30000.0 30.0 120.0)
+(commit-tx)
+(env-chain-data { "block-time": (time "2026-09-20T17:43:53Z") })
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER gp.BOB (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 100.0)]}])
+(begin-tx)
+(expect "GAP-5 PRECONDITION the row holds the doubled share" 0.04 (at 'reserve-fraction (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params)))
+(expect "GAP-5 PRECONDITION the open round holds the share it opened under" 0.02 (at 'frac-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)))
+(expect "GAP-5a the advert is sized on the FROZEN share" 5.457261918296
+  (at 0 (at 'max-stakes (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status))))
+(expect "GAP-5b and bet takes it" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet gp.BOB { "entries": [ { "machine": 0, "stake": 5.457261918296, "spins": 1 } ] }))
+(rollback-tx)
+(begin-tx)
+(expect-failure "GAP-5c what the doubled share would advertise is refused"
+  "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet gp.BOB { "entries": [ { "machine": 0, "stake": 12.914529041751, "spins": 1 } ] }))
+(rollback-tx)
+(env-sigs [])
+
+;; ---- world B: GAP-6, an advert EQUAL to the minimum ---------------------------
+;; CF-5 probes the under-minimum branch at 10 KDA (0.0 published) and 21 KDA
+;; (0.0105 published); the advert EQUAL to the minimum is produced only here, so
+;; >= cannot become > unseen. A pot of exactly 0.400400390625 at share 1.0 and
+;; scale 1.0 has room for exactly 0.01: 40 x 0.01 + floor(41/1024 x 0.01, 12) =
+;; 0.4 + 0.000400390625. The same board sits EXACTLY on the table limit, so it is
+;; also the equality probe of `bet`'s <=.
+(load "slots-test-init.repl" true)
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.initialize n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT 0.1)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.set-params 1.0 0.01 0.1 30.0 120.0)
+(commit-tx)
+(env-sigs [{"key":"h0u5e00000000000000000000000000000000000000000000000000000000004"
+           ,"caps":[(coin.TRANSFER "house-funder" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 0.400400390625)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.fund-house "house-funder" 0.400400390625)
+(commit-tx)
+(env-chain-data { "block-time": (time "2026-09-20T17:43:43Z") })
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER "k:a11ce00000000000000000000000000000000000000000000000000000000001" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 1.0)]}])
+(begin-tx)
+(expect "GAP-6 PRECONDITION scale 1.0, minimum 0.01, 0.400400390625 spare"
+  [1.0 0.01 0.400400390625]
+  (let ((p (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status))) [(at 'fee-scale-now p) (at 'min-bet p) (at 'available p)]))
+(expect "GAP-6a an advert EQUAL to the minimum is published, not zeroed" 0.01
+  (at 0 (at 'max-stakes (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status))))
+(expect "GAP-6b and that board, exactly ON the table limit, is accepted" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet "k:a11ce00000000000000000000000000000000000000000000000000000000001" { "entries": [ { "machine": 0, "stake": 0.01, "spins": 1 } ] }))
+(expect "GAP-6c it filled the table to the last unit: exposure + fee == the cap" 0.400400390625
+  (let ((r (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1))) (+ (at 'exposure r) (at 'fee-owed r))))
+(rollback-tx)
+(begin-tx)
+(expect-failure "GAP-6d one unit more is refused by the table limit"
+  "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet "k:a11ce00000000000000000000000000000000000000000000000000000000001" { "entries": [ { "machine": 0, "stake": 0.010000000001, "spins": 1 } ] }))
+(rollback-tx)
+(env-sigs [])
+
+;; ---- world C: GAP-12, the advert's next-unit probe below full fee scale --------
+;; pot-status tries the next 1e-12 unit against the EXACT inequality `bet`
+;; enforces, at the pot's CURRENT fee scale; CF-3 exercises that probe only where
+;; the answer is the same at scale 1.0. Also pins pot-status' max-spins field.
+;; VALUES (Python fractions, independent of the module): pot 15000.042 against a
+;; 30000 target -> scale floor(15000.042/30000, 12) = 0.5000014; cap 0.02 x
+;; 15000.042 = 300.00084; under = floor(300.00084 / (40 + 0.5000014 x 41/1024), 12)
+;; = 7.496269194609, and the next unit 7.49626919461 still fits at that scale
+;; (40x + floor(scale x edge x s, 12) <= cap) but NOT at 1.0.
+(load "slots-test-init.repl" true)
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.initialize n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT 30000.0)
+(commit-tx)
+(env-sigs [{"key":"h0u5e00000000000000000000000000000000000000000000000000000000004"
+           ,"caps":[(coin.TRANSFER "house-funder" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 15000.042)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.fund-house "house-funder" 15000.042)
+(commit-tx)
+(env-chain-data { "block-time": (time "2026-09-20T17:43:43Z") })
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER "k:a11ce00000000000000000000000000000000000000000000000000000000001" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 100.0)]}])
+(begin-tx)
+(expect "GAP-12 PRECONDITION the fee runs at scale 0.5000014, below full" 0.5000014
+  (at 'fee-scale-now (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status)))
+(expect "GAP-12a the advert is the NEXT unit, which fits at the pot's own scale" 7.49626919461
+  (at 0 (at 'max-stakes (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status))))
+(expect "GAP-12b VALUE pot-status quotes the 77 spins a board may hold" 77
+  (at 'max-spins (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status)))
+(expect "GAP-12c and bet accepts exactly that board" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet "k:a11ce00000000000000000000000000000000000000000000000000000000001" { "entries": [ { "machine": 0, "stake": 7.49626919461, "spins": 1 } ] }))
+(rollback-tx)
+(begin-tx)
+(expect-failure "GAP-12d one unit more is refused by the table limit"
+  "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet "k:a11ce00000000000000000000000000000000000000000000000000000000001" { "entries": [ { "machine": 0, "stake": 7.496269194611, "spins": 1 } ] }))
+(rollback-tx)
+(env-sigs [])
+
+;; ============================================================================
+;; CF-9  max-stakes IS EXACT FOR EVERY MACHINE
+;;   pot-status publishes one figure per machine id: the largest board TOTAL `bet`
+;;   takes on that machine now. For each of the six machines, on an empty table
+;;   and on a round already holding boards of two OTHER machines, at a fee scale
+;;   below 1 and at 1: the published figure, placed as ONE spin, is accepted, and
+;;   one unit of the twelfth decimal more is refused by the table limit.
+;;   World: target 100,000, pot 50,000 (scale 0.5); scale 1 is set inside each
+;;   probe's own rolled-back transaction by lowering the target to 1,000. The
+;;   other machines' boards: bob 20 x 0.1 on machine (m+1) mod 6, carol 1 x 0.3 on
+;;   machine (m+3) mod 6.
+;;   VALUES: an independent Python Decimal model of `bet` and `pot-status`
+;;   (cf9.py, not published, prec 200): each earlier board's fee floored at
+;;   the scale it saw, room = 0.02 x min(available, a0) - (exposure + fees), then
+;;   floor(room / (maxmult + scale x edge), 12) with maxmult 40 18 250 40 100 112.6
+;;   and edge 0.0400390625 (x3), 0.0399169921875, 0.035211267092143782350633855823,
+;;   0.040478515625; then the next 1e-12 unit is kept when
+;;   maxmult x s + floor(scale x edge x s, 12) <= room. In the 24 probes below the
+;;   quotient's floor is the answer; CF-9n below makes the next unit the answer
+;;   on every machine.
+;; ============================================================================
+(load "slots-test-init.repl" true)
+(begin-tx)
+(module c9 CG (defcap CG () (enforce true "ok"))
+  (defconst ALICE "k:a11ce00000000000000000000000000000000000000000000000000000000001")
+  (defconst BOBBY "k:b0b0000000000000000000000000000000000000000000000000000000000002")
+  (defconst CAROL "k:ca40100000000000000000000000000000000000000000000000000000000003")
+  (defun wm:object (m:integer stake:decimal spins:integer) { "entries": [ { "machine": m, "stake": stake, "spins": spins } ] })
+  (defun ms:decimal (m:integer) (at m (at 'max-stakes (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status))))
+  (defun others:string (m:integer)
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet BOBBY (wm (mod (+ m 1) 6) 0.1 20))
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet CAROL (wm (mod (+ m 3) 6) 0.3 1)))
+  (defun scale1:string () (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.set-params 0.02 0.01 1000.0 30.0 120.0)))
+(commit-tx)
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.initialize n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT 100000.0)
+(commit-tx)
+(env-sigs [{"key":"h0u5e00000000000000000000000000000000000000000000000000000000004"
+           ,"caps":[(coin.TRANSFER "house-funder" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 50000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.fund-house "house-funder" 50000.0)
+(commit-tx)
+(env-chain-data { "block-time": (time "2026-09-20T17:43:43Z") })
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}
+          ,{"key":"h0u5e00000000000000000000000000000000000000000000000000000000004"
+           ,"caps":[(coin.TRANSFER "house-funder" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 1000.0)]}
+          ,{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER c9.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 100000.0)]}
+          ,{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER c9.BOBBY (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 100000.0)]}
+          ,{"key":"ca40100000000000000000000000000000000000000000000000000000000003"
+           ,"caps":[(coin.TRANSFER c9.CAROL (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 100000.0)]}])
+(begin-tx)
+(expect "CF-9 PRECONDITION no round is open and the fee scale is 0.5" [0 0.5]
+  [(at 'current (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params)) (at 'fee-scale-now (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status))])
+(expect "CF-9 PRECONDITION pot-status publishes one figure per machine" 6
+  (length (at 'max-stakes (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status))))
+(commit-tx)
+
+;; machine 0 (classic), an empty table, scale 0.5
+(begin-tx)
+(expect "CF-9.0he1 PRECONDITION the fee scale" 0.5 (at 'fee-scale-now (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status)))
+(expect "CF-9.0he2 the published maximum for machine 0" 24.987494052049 (c9.ms 0))
+(expect "CF-9.0he3 it is accepted verbatim as one spin on machine 0" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 0 24.987494052049 1)))
+(expect "CF-9.0he4 the board sits on machine 0" 0 (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.ALICE)))))
+(rollback-tx)
+(begin-tx)
+(expect-failure "CF-9.0he5 one unit of the last decimal more is refused by the table limit"
+  "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 0 (+ 24.987494052049 0.000000000001) 1)))
+(rollback-tx)
+;; machine 0 (classic), a round holding machines 1 and 3, scale 0.499542539774
+(begin-tx)
+(c9.others 0)
+(expect "CF-9.0ho0 PRECONDITION round 1 holds two boards, on machines 1 and 3" [2 1 3]
+  [(at 'boards (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)) (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.BOBBY)))) (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.CAROL))))])
+(expect "CF-9.0ho1 PRECONDITION the fee scale" 0.499542539774 (at 'fee-scale-now (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status)))
+(expect "CF-9.0ho2 the published maximum for machine 0" 23.764093656711 (c9.ms 0))
+(expect "CF-9.0ho3 it is accepted verbatim as one spin on machine 0" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 0 23.764093656711 1)))
+(expect "CF-9.0ho4 the board sits on machine 0" 0 (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.ALICE)))))
+(rollback-tx)
+(begin-tx)
+(c9.others 0)
+(expect-failure "CF-9.0ho5 one unit of the last decimal more is refused by the table limit"
+  "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 0 (+ 23.764093656711 0.000000000001) 1)))
+(rollback-tx)
+;; machine 0 (classic), an empty table, scale 1
+(begin-tx)
+(c9.scale1)
+(expect "CF-9.0se1 PRECONDITION the fee scale" 1.0 (at 'fee-scale-now (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status)))
+(expect "CF-9.0se2 the published maximum for machine 0" 24.975000609741 (c9.ms 0))
+(expect "CF-9.0se3 it is accepted verbatim as one spin on machine 0" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 0 24.975000609741 1)))
+(expect "CF-9.0se4 the board sits on machine 0" 0 (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.ALICE)))))
+(rollback-tx)
+(begin-tx)
+(c9.scale1)
+(expect-failure "CF-9.0se5 one unit of the last decimal more is refused by the table limit"
+  "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 0 (+ 24.975000609741 0.000000000001) 1)))
+(rollback-tx)
+;; machine 0 (classic), a round holding machines 1 and 3, scale 1
+(begin-tx)
+(c9.scale1)
+(c9.others 0)
+(expect "CF-9.0so0 PRECONDITION round 1 holds two boards, on machines 1 and 3" [2 1 3]
+  [(at 'boards (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)) (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.BOBBY)))) (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.CAROL))))])
+(expect "CF-9.0so1 PRECONDITION the fee scale" 1.0 (at 'fee-scale-now (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status)))
+(expect "CF-9.0so2 the published maximum for machine 0" 23.751028420038 (c9.ms 0))
+(expect "CF-9.0so3 it is accepted verbatim as one spin on machine 0" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 0 23.751028420038 1)))
+(expect "CF-9.0so4 the board sits on machine 0" 0 (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.ALICE)))))
+(rollback-tx)
+(begin-tx)
+(c9.scale1)
+(c9.others 0)
+(expect-failure "CF-9.0so5 one unit of the last decimal more is refused by the table limit"
+  "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 0 (+ 23.751028420038 0.000000000001) 1)))
+(rollback-tx)
+;; machine 1 (easy), an empty table, scale 0.5
+(begin-tx)
+(expect "CF-9.1he1 PRECONDITION the fee scale" 0.5 (at 'fee-scale-now (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status)))
+(expect "CF-9.1he2 the published maximum for machine 1" 55.493835523641 (c9.ms 1))
+(expect "CF-9.1he3 it is accepted verbatim as one spin on machine 1" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 1 55.493835523641 1)))
+(expect "CF-9.1he4 the board sits on machine 1" 1 (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.ALICE)))))
+(rollback-tx)
+(begin-tx)
+(expect-failure "CF-9.1he5 one unit of the last decimal more is refused by the table limit"
+  "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 1 (+ 55.493835523641 0.000000000001) 1)))
+(rollback-tx)
+;; machine 1 (easy), a round holding machines 2 and 4, scale 0.494722547318
+(begin-tx)
+(c9.others 1)
+(expect "CF-9.1ho0 PRECONDITION round 1 holds two boards, on machines 2 and 4" [2 2 4]
+  [(at 'boards (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)) (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.BOBBY)))) (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.CAROL))))])
+(expect "CF-9.1ho1 PRECONDITION the fee scale" 0.494722547318 (at 'fee-scale-now (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status)))
+(expect "CF-9.1ho2 the published maximum for machine 1" 25.494157357696 (c9.ms 1))
+(expect "CF-9.1ho3 it is accepted verbatim as one spin on machine 1" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 1 25.494157357696 1)))
+(expect "CF-9.1ho4 the board sits on machine 1" 1 (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.ALICE)))))
+(rollback-tx)
+(begin-tx)
+(c9.others 1)
+(expect-failure "CF-9.1ho5 one unit of the last decimal more is refused by the table limit"
+  "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 1 (+ 25.494157357696 0.000000000001) 1)))
+(rollback-tx)
+;; machine 1 (easy), an empty table, scale 1
+(begin-tx)
+(c9.scale1)
+(expect "CF-9.1se1 PRECONDITION the fee scale" 1.0 (at 'fee-scale-now (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status)))
+(expect "CF-9.1se2 the published maximum for machine 1" 55.432252476587 (c9.ms 1))
+(expect "CF-9.1se3 it is accepted verbatim as one spin on machine 1" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 1 55.432252476587 1)))
+(expect "CF-9.1se4 the board sits on machine 1" 1 (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.ALICE)))))
+(rollback-tx)
+(begin-tx)
+(c9.scale1)
+(expect-failure "CF-9.1se5 one unit of the last decimal more is refused by the table limit"
+  "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 1 (+ 55.432252476587 0.000000000001) 1)))
+(rollback-tx)
+;; machine 1 (easy), a round holding machines 2 and 4, scale 1
+(begin-tx)
+(c9.scale1)
+(c9.others 1)
+(expect "CF-9.1so0 PRECONDITION round 1 holds two boards, on machines 2 and 4" [2 2 4]
+  [(at 'boards (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)) (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.BOBBY)))) (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.CAROL))))])
+(expect "CF-9.1so1 PRECONDITION the fee scale" 1.0 (at 'fee-scale-now (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status)))
+(expect "CF-9.1so2 the published maximum for machine 1" 25.463001719305 (c9.ms 1))
+(expect "CF-9.1so3 it is accepted verbatim as one spin on machine 1" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 1 25.463001719305 1)))
+(expect "CF-9.1so4 the board sits on machine 1" 1 (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.ALICE)))))
+(rollback-tx)
+(begin-tx)
+(c9.scale1)
+(c9.others 1)
+(expect-failure "CF-9.1so5 one unit of the last decimal more is refused by the table limit"
+  "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 1 (+ 25.463001719305 0.000000000001) 1)))
+(rollback-tx)
+;; machine 2 (big), an empty table, scale 0.5
+(begin-tx)
+(expect "CF-9.2he1 PRECONDITION the fee scale" 0.5 (at 'fee-scale-now (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status)))
+(expect "CF-9.2he2 the published maximum for machine 2" 3.999679713147 (c9.ms 2))
+(expect "CF-9.2he3 it is accepted verbatim as one spin on machine 2" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 2 3.999679713147 1)))
+(expect "CF-9.2he4 the board sits on machine 2" 2 (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.ALICE)))))
+(rollback-tx)
+(begin-tx)
+(expect-failure "CF-9.2he5 one unit of the last decimal more is refused by the table limit"
+  "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 2 (+ 3.999679713147 0.000000000001) 1)))
+(rollback-tx)
+;; machine 2 (big), a round holding machines 3 and 5, scale 0.498884740207
+(begin-tx)
+(c9.others 2)
+(expect "CF-9.2ho0 PRECONDITION round 1 holds two boards, on machines 3 and 5" [2 3 5]
+  [(at 'boards (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)) (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.BOBBY)))) (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.CAROL))))])
+(expect "CF-9.2ho1 PRECONDITION the fee scale" 0.498884740207 (at 'fee-scale-now (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status)))
+(expect "CF-9.2ho2 the published maximum for machine 2" 3.535491520448 (c9.ms 2))
+(expect "CF-9.2ho3 it is accepted verbatim as one spin on machine 2" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 2 3.535491520448 1)))
+(expect "CF-9.2ho4 the board sits on machine 2" 2 (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.ALICE)))))
+(rollback-tx)
+(begin-tx)
+(c9.others 2)
+(expect-failure "CF-9.2ho5 one unit of the last decimal more is refused by the table limit"
+  "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 2 (+ 3.535491520448 0.000000000001) 1)))
+(rollback-tx)
+;; machine 2 (big), an empty table, scale 1
+(begin-tx)
+(c9.scale1)
+(expect "CF-9.2se1 PRECONDITION the fee scale" 1.0 (at 'fee-scale-now (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status)))
+(expect "CF-9.2se2 the published maximum for machine 2" 3.999359477583 (c9.ms 2))
+(expect "CF-9.2se3 it is accepted verbatim as one spin on machine 2" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 2 3.999359477583 1)))
+(expect "CF-9.2se4 the board sits on machine 2" 2 (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.ALICE)))))
+(rollback-tx)
+(begin-tx)
+(c9.scale1)
+(expect-failure "CF-9.2se5 one unit of the last decimal more is refused by the table limit"
+  "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 2 (+ 3.999359477583 0.000000000001) 1)))
+(rollback-tx)
+;; machine 2 (big), a round holding machines 3 and 5, scale 1
+(begin-tx)
+(c9.scale1)
+(c9.others 2)
+(expect "CF-9.2so0 PRECONDITION round 1 holds two boards, on machines 3 and 5" [2 3 5]
+  [(at 'boards (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)) (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.BOBBY)))) (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.CAROL))))])
+(expect "CF-9.2so1 PRECONDITION the fee scale" 1.0 (at 'fee-scale-now (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status)))
+(expect "CF-9.2so2 the published maximum for machine 2" 3.535020176065 (c9.ms 2))
+(expect "CF-9.2so3 it is accepted verbatim as one spin on machine 2" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 2 3.535020176065 1)))
+(expect "CF-9.2so4 the board sits on machine 2" 2 (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.ALICE)))))
+(rollback-tx)
+(begin-tx)
+(c9.scale1)
+(c9.others 2)
+(expect-failure "CF-9.2so5 one unit of the last decimal more is refused by the table limit"
+  "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 2 (+ 3.535020176065 0.000000000001) 1)))
+(rollback-tx)
+;; machine 3 (wild), an empty table, scale 0.5
+(begin-tx)
+(expect "CF-9.3he1 PRECONDITION the fee scale" 0.5 (at 'fee-scale-now (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status)))
+(expect "CF-9.3he2 the published maximum for machine 3" 24.987532160924 (c9.ms 3))
+(expect "CF-9.3he3 it is accepted verbatim as one spin on machine 3" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 3 24.987532160924 1)))
+(expect "CF-9.3he4 the board sits on machine 3" 3 (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.ALICE)))))
+(rollback-tx)
+(begin-tx)
+(expect-failure "CF-9.3he5 one unit of the last decimal more is refused by the table limit"
+  "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 3 (+ 24.987532160924 0.000000000001) 1)))
+(rollback-tx)
+;; machine 3 (wild), a round holding machines 4 and 0, scale 0.497902588066
+(begin-tx)
+(c9.others 3)
+(expect "CF-9.3ho0 PRECONDITION round 1 holds two boards, on machines 4 and 0" [2 4 0]
+  [(at 'boards (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)) (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.BOBBY)))) (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.CAROL))))])
+(expect "CF-9.3ho1 PRECONDITION the fee scale" 0.497902588066 (at 'fee-scale-now (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status)))
+(expect "CF-9.3ho2 the published maximum for machine 3" 19.584368697447 (c9.ms 3))
+(expect "CF-9.3ho3 it is accepted verbatim as one spin on machine 3" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 3 19.584368697447 1)))
+(expect "CF-9.3ho4 the board sits on machine 3" 3 (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.ALICE)))))
+(rollback-tx)
+(begin-tx)
+(c9.others 3)
+(expect-failure "CF-9.3ho5 one unit of the last decimal more is refused by the table limit"
+  "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 3 (+ 19.584368697447 0.000000000001) 1)))
+(rollback-tx)
+;; machine 3 (wild), an empty table, scale 1
+(begin-tx)
+(c9.scale1)
+(expect "CF-9.3se1 PRECONDITION the fee scale" 1.0 (at 'fee-scale-now (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status)))
+(expect "CF-9.3se2 the published maximum for machine 3" 24.97507675141 (c9.ms 3))
+(expect "CF-9.3se3 it is accepted verbatim as one spin on machine 3" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 3 24.97507675141 1)))
+(expect "CF-9.3se4 the board sits on machine 3" 3 (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.ALICE)))))
+(rollback-tx)
+(begin-tx)
+(c9.scale1)
+(expect-failure "CF-9.3se5 one unit of the last decimal more is refused by the table limit"
+  "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 3 (+ 24.97507675141 0.000000000001) 1)))
+(rollback-tx)
+;; machine 3 (wild), a round holding machines 4 and 0, scale 1
+(begin-tx)
+(c9.scale1)
+(c9.others 3)
+(expect "CF-9.3so0 PRECONDITION round 1 holds two boards, on machines 4 and 0" [2 4 0]
+  [(at 'boards (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)) (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.BOBBY)))) (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.CAROL))))])
+(expect "CF-9.3so1 PRECONDITION the fee scale" 1.0 (at 'fee-scale-now (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status)))
+(expect "CF-9.3so2 the published maximum for machine 3" 19.573515030386 (c9.ms 3))
+(expect "CF-9.3so3 it is accepted verbatim as one spin on machine 3" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 3 19.573515030386 1)))
+(expect "CF-9.3so4 the board sits on machine 3" 3 (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.ALICE)))))
+(rollback-tx)
+(begin-tx)
+(c9.scale1)
+(c9.others 3)
+(expect-failure "CF-9.3so5 one unit of the last decimal more is refused by the table limit"
+  "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 3 (+ 19.573515030386 0.000000000001) 1)))
+(rollback-tx)
+;; machine 4 (free-spins), an empty table, scale 0.5
+(begin-tx)
+(expect "CF-9.4he1 PRECONDITION the fee scale" 0.5 (at 'fee-scale-now (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status)))
+(expect "CF-9.4he2 the published maximum for machine 4" 9.998239746549 (c9.ms 4))
+(expect "CF-9.4he3 it is accepted verbatim as one spin on machine 4" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 4 9.998239746549 1)))
+(expect "CF-9.4he4 the board sits on machine 4" 4 (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.ALICE)))))
+(rollback-tx)
+(begin-tx)
+(expect-failure "CF-9.4he5 one unit of the last decimal more is refused by the table limit"
+  "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 4 (+ 9.998239746549 0.000000000001) 1)))
+(rollback-tx)
+;; machine 4 (free-spins), a round holding machines 5 and 1, scale 0.497716535424
+(begin-tx)
+(c9.others 4)
+(expect "CF-9.4ho0 PRECONDITION round 1 holds two boards, on machines 5 and 1" [2 5 1]
+  [(at 'boards (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)) (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.BOBBY)))) (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.CAROL))))])
+(expect "CF-9.4ho1 PRECONDITION the fee scale" 0.497716535424 (at 'fee-scale-now (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status)))
+(expect "CF-9.4ho2 the published maximum for machine 4" 7.646526061619 (c9.ms 4))
+(expect "CF-9.4ho3 it is accepted verbatim as one spin on machine 4" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 4 7.646526061619 1)))
+(expect "CF-9.4ho4 the board sits on machine 4" 4 (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.ALICE)))))
+(rollback-tx)
+(begin-tx)
+(c9.others 4)
+(expect-failure "CF-9.4ho5 one unit of the last decimal more is refused by the table limit"
+  "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 4 (+ 7.646526061619 0.000000000001) 1)))
+(rollback-tx)
+;; machine 4 (free-spins), an empty table, scale 1
+(begin-tx)
+(c9.scale1)
+(expect "CF-9.4se1 PRECONDITION the fee scale" 1.0 (at 'fee-scale-now (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status)))
+(expect "CF-9.4se2 the published maximum for machine 4" 9.996480112687 (c9.ms 4))
+(expect "CF-9.4se3 it is accepted verbatim as one spin on machine 4" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 4 9.996480112687 1)))
+(expect "CF-9.4se4 the board sits on machine 4" 4 (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.ALICE)))))
+(rollback-tx)
+(begin-tx)
+(c9.scale1)
+(expect-failure "CF-9.4se5 one unit of the last decimal more is refused by the table limit"
+  "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 4 (+ 9.996480112687 0.000000000001) 1)))
+(rollback-tx)
+;; machine 4 (free-spins), a round holding machines 5 and 1, scale 1
+(begin-tx)
+(c9.scale1)
+(c9.others 4)
+(expect "CF-9.4so0 PRECONDITION round 1 holds two boards, on machines 5 and 1" [2 5 1]
+  [(at 'boards (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)) (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.BOBBY)))) (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.CAROL))))])
+(expect "CF-9.4so1 PRECONDITION the fee scale" 1.0 (at 'fee-scale-now (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status)))
+(expect "CF-9.4so2 the published maximum for machine 4" 7.644699923041 (c9.ms 4))
+(expect "CF-9.4so3 it is accepted verbatim as one spin on machine 4" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 4 7.644699923041 1)))
+(expect "CF-9.4so4 the board sits on machine 4" 4 (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.ALICE)))))
+(rollback-tx)
+(begin-tx)
+(c9.scale1)
+(c9.others 4)
+(expect-failure "CF-9.4so5 one unit of the last decimal more is refused by the table limit"
+  "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 4 (+ 7.644699923041 0.000000000001) 1)))
+(rollback-tx)
+;; machine 5 (tumble), an empty table, scale 0.5
+(begin-tx)
+(expect "CF-9.5he1 PRECONDITION the fee scale" 0.5 (at 'fee-scale-now (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status)))
+(expect "CF-9.5he2 the published maximum for machine 5" 8.879398646195 (c9.ms 5))
+(expect "CF-9.5he3 it is accepted verbatim as one spin on machine 5" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 5 8.879398646195 1)))
+(expect "CF-9.5he4 the board sits on machine 5" 5 (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.ALICE)))))
+(rollback-tx)
+(begin-tx)
+(expect-failure "CF-9.5he5 one unit of the last decimal more is refused by the table limit"
+  "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 5 (+ 8.879398646195 0.000000000001) 1)))
+(rollback-tx)
+;; machine 5 (tumble), a round holding machines 0 and 2, scale 0.498472539644
+(begin-tx)
+(c9.others 5)
+(expect "CF-9.5ho0 PRECONDITION round 1 holds two boards, on machines 0 and 2" [2 0 2]
+  [(at 'boards (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)) (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.BOBBY)))) (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.CAROL))))])
+(expect "CF-9.5ho1 PRECONDITION the fee scale" 0.498472539644 (at 'fee-scale-now (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status)))
+(expect "CF-9.5ho2 the published maximum for machine 5" 7.475561333365 (c9.ms 5))
+(expect "CF-9.5ho3 it is accepted verbatim as one spin on machine 5" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 5 7.475561333365 1)))
+(expect "CF-9.5ho4 the board sits on machine 5" 5 (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.ALICE)))))
+(rollback-tx)
+(begin-tx)
+(c9.others 5)
+(expect-failure "CF-9.5ho5 one unit of the last decimal more is refused by the table limit"
+  "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 5 (+ 7.475561333365 0.000000000001) 1)))
+(rollback-tx)
+;; machine 5 (tumble), an empty table, scale 1
+(begin-tx)
+(c9.scale1)
+(expect "CF-9.5se1 PRECONDITION the fee scale" 1.0 (at 'fee-scale-now (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status)))
+(expect "CF-9.5se2 the published maximum for machine 5" 8.877803194535 (c9.ms 5))
+(expect "CF-9.5se3 it is accepted verbatim as one spin on machine 5" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 5 8.877803194535 1)))
+(expect "CF-9.5se4 the board sits on machine 5" 5 (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.ALICE)))))
+(rollback-tx)
+(begin-tx)
+(c9.scale1)
+(expect-failure "CF-9.5se5 one unit of the last decimal more is refused by the table limit"
+  "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 5 (+ 8.877803194535 0.000000000001) 1)))
+(rollback-tx)
+;; machine 5 (tumble), a round holding machines 0 and 2, scale 1
+(begin-tx)
+(c9.scale1)
+(c9.others 5)
+(expect "CF-9.5so0 PRECONDITION round 1 holds two boards, on machines 0 and 2" [2 0 2]
+  [(at 'boards (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)) (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.BOBBY)))) (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.CAROL))))])
+(expect "CF-9.5so1 PRECONDITION the fee scale" 1.0 (at 'fee-scale-now (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status)))
+(expect "CF-9.5so2 the published maximum for machine 5" 7.473796981807 (c9.ms 5))
+(expect "CF-9.5so3 it is accepted verbatim as one spin on machine 5" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 5 7.473796981807 1)))
+(expect "CF-9.5so4 the board sits on machine 5" 5 (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.ALICE)))))
+(rollback-tx)
+(begin-tx)
+(c9.scale1)
+(c9.others 5)
+(expect-failure "CF-9.5so5 one unit of the last decimal more is refused by the table limit"
+  "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 5 (+ 7.473796981807 0.000000000001) 1)))
+(rollback-tx)
+;; ============================================================================
+;; CF-9n  THE NEXT-UNIT BRANCH, ON EVERY MACHINE
+;;   max-board floors the quotient, then tries one unit more against `bet`'s own
+;;   inequality, because `bet` floors the fee. For each machine a pot was found
+;;   (Python search over 50,000 + k x 0.000001 at scale 1, same model) where that
+;;   next unit fits: the published figure is the quotient's floor PLUS 1e-12, it
+;;   is accepted, and one more unit is refused. The extra funding and the scale-1
+;;   target are inside each probe's rolled-back transaction.
+;; ============================================================================
+(begin-tx)
+(c9.scale1)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.fund-house "house-funder" 0.020437)
+(expect "CF-9n.00 PRECONDITION the pot is 50000.020437 at scale 1" [50000.020437 1.0]
+  [(at 'available (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status)) (at 'fee-scale-now (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status))])
+;; the quotient alone floors to 24.975010818022; the next unit fits
+(expect "CF-9n.01 machine 0 publishes the quotient's floor plus one unit" 24.975010818023 (c9.ms 0))
+(expect "CF-9n.02 and it is accepted verbatim" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 0 24.975010818023 1)))
+(rollback-tx)
+(begin-tx)
+(c9.scale1)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.fund-house "house-funder" 0.020437)
+(expect-failure "CF-9n.03 one unit more is refused by the table limit"
+  "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 0 (+ 24.975010818023 0.000000000001) 1)))
+(rollback-tx)
+(begin-tx)
+(c9.scale1)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.fund-house "house-funder" 0.000007)
+(expect "CF-9n.10 PRECONDITION the pot is 50000.000007 at scale 1" [50000.000007 1.0]
+  [(at 'available (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status)) (at 'fee-scale-now (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status))])
+;; the quotient alone floors to 55.432252484347; the next unit fits
+(expect "CF-9n.11 machine 1 publishes the quotient's floor plus one unit" 55.432252484348 (c9.ms 1))
+(expect "CF-9n.12 and it is accepted verbatim" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 1 55.432252484348 1)))
+(rollback-tx)
+(begin-tx)
+(c9.scale1)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.fund-house "house-funder" 0.000007)
+(expect-failure "CF-9n.13 one unit more is refused by the table limit"
+  "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 1 (+ 55.432252484348 0.000000000001) 1)))
+(rollback-tx)
+(begin-tx)
+(c9.scale1)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.fund-house "house-funder" 0.000755)
+(expect "CF-9n.20 PRECONDITION the pot is 50000.000755 at scale 1" [50000.000755 1.0]
+  [(at 'available (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status)) (at 'fee-scale-now (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status))])
+;; the quotient alone floors to 3.999359537973; the next unit fits
+(expect "CF-9n.21 machine 2 publishes the quotient's floor plus one unit" 3.999359537974 (c9.ms 2))
+(expect "CF-9n.22 and it is accepted verbatim" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 2 3.999359537974 1)))
+(rollback-tx)
+(begin-tx)
+(c9.scale1)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.fund-house "house-funder" 0.000755)
+(expect-failure "CF-9n.23 one unit more is refused by the table limit"
+  "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 2 (+ 3.999359537974 0.000000000001) 1)))
+(rollback-tx)
+(begin-tx)
+(c9.scale1)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.fund-house "house-funder" 0.00012)
+(expect "CF-9n.30 PRECONDITION the pot is 50000.00012 at scale 1" [50000.00012 1.0]
+  [(at 'available (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status)) (at 'fee-scale-now (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status))])
+;; the quotient alone floors to 24.97507681135; the next unit fits
+(expect "CF-9n.31 machine 3 publishes the quotient's floor plus one unit" 24.975076811351 (c9.ms 3))
+(expect "CF-9n.32 and it is accepted verbatim" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 3 24.975076811351 1)))
+(rollback-tx)
+(begin-tx)
+(c9.scale1)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.fund-house "house-funder" 0.00012)
+(expect-failure "CF-9n.33 one unit more is refused by the table limit"
+  "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 3 (+ 24.975076811351 0.000000000001) 1)))
+(rollback-tx)
+(begin-tx)
+(c9.scale1)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.fund-house "house-funder" 0.000067)
+(expect "CF-9n.40 PRECONDITION the pot is 50000.000067 at scale 1" [50000.000067 1.0]
+  [(at 'available (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status)) (at 'fee-scale-now (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status))])
+;; the quotient alone floors to 9.996480126082; the next unit fits
+(expect "CF-9n.41 machine 4 publishes the quotient's floor plus one unit" 9.996480126083 (c9.ms 4))
+(expect "CF-9n.42 and it is accepted verbatim" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 4 9.996480126083 1)))
+(rollback-tx)
+(begin-tx)
+(c9.scale1)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.fund-house "house-funder" 0.000067)
+(expect-failure "CF-9n.43 one unit more is refused by the table limit"
+  "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 4 (+ 9.996480126083 0.000000000001) 1)))
+(rollback-tx)
+(begin-tx)
+(c9.scale1)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.fund-house "house-funder" 0.000289)
+(expect "CF-9n.50 PRECONDITION the pot is 50000.000289 at scale 1" [50000.000289 1.0]
+  [(at 'available (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status)) (at 'fee-scale-now (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status))])
+;; the quotient alone floors to 8.877803245848; the next unit fits
+(expect "CF-9n.51 machine 5 publishes the quotient's floor plus one unit" 8.877803245849 (c9.ms 5))
+(expect "CF-9n.52 and it is accepted verbatim" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 5 8.877803245849 1)))
+(rollback-tx)
+(begin-tx)
+(c9.scale1)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.fund-house "house-funder" 0.000289)
+(expect-failure "CF-9n.53 one unit more is refused by the table limit"
+  "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE (c9.wm 5 (+ 8.877803245849 0.000000000001) 1)))
+(rollback-tx)
+;; ============================================================================
+;; CF-10  ONE MACHINE PER BOARD AGAINST THE TABLE LIMIT
+;;   A board plays one machine, so the table limit binds what the round's BOARDS add up to.
+;;   Same world as CF-9 (pot 50,000, target 100,000, scale 0.5, empty-table cap 0.02 x
+;;   50,000 = 1,000).
+;;   CF-10a  max-stakes is each machine's one-board maximum on the empty table
+;;   CF-10b  a board of two machines is refused by its COUNT before the limit is looked at,
+;;           whether or not its sum would fit
+;;   CF-10e  two boards that each fit their own max-stakes do not fit together: the second
+;;           is refused by the table limit
+;;   CF-10h  with another board in the round, max-stakes is exactly the largest board `bet`
+;;           accepts on every machine
+;;   VALUES: eo.Table (not published), an exact Fraction
+;;   model of `bet` and `pot-status`: fee floor(scale x edge x total, 12), multipliers 40 18
+;;   250 40 100 563/5 and edges from the return fractions as literals; it reproduces CF-10a.
+;; ============================================================================
+(begin-tx)
+(expect "CF-10a max-stakes on the empty table is the one-board maximum of each machine (model)"
+  [24.987494052049 55.493835523641 3.999679713147 24.987532160924 9.998239746549 8.879398646195]
+  (at 'max-stakes (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status)))
+(expect "CF-10a1 CONTROL each is the quotient room / (MAX-MULT + scale x edge) of ONE machine: machine 2 is 1000 / 250.02001953125, floored" true
+  (= (at 2 (at 'max-stakes (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status))) (floor (/ 1000.0 250.02001953125) 12)))
+(rollback-tx)
+(begin-tx)
+(expect-failure "CF-10b a two-machine board whose sum would fit the limit is refused by its count"
+  "a board plays one machine: it holds exactly one entry"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE { "entries": [{ "machine": 5, "stake": 0.100000000049, "spins": 10 } { "machine": 0, "stake": 1.0, "spins": 1 }] }))
+(rollback-tx)
+(begin-tx)
+(expect-failure "CF-10b1 and a two-machine board far over the limit gets the COUNT message, not the limit's"
+  "a board plays one machine: it holds exactly one entry"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE { "entries": [{ "machine": 0, "stake": 24.987494052049, "spins": 1 } { "machine": 2, "stake": 3.999679713147, "spins": 1 }] }))
+(rollback-tx)
+(begin-tx)
+(expect "CF-10e0 PRECONDITION machine 0's published maximum 24.987494052049 is accepted ALONE" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE { "entries": [{ "machine": 0, "stake": 24.987494052049, "spins": 1 }] }))
+(rollback-tx)
+(begin-tx)
+(expect "CF-10e1 PRECONDITION machine 2's published maximum 3.999679713147 is accepted ALONE" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.BOBBY { "entries": [{ "machine": 2, "stake": 3.999679713147, "spins": 1 }] }))
+(rollback-tx)
+(begin-tx)
+(expect "CF-10f0 alice's classic at its own maximum opens the round" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE { "entries": [{ "machine": 0, "stake": 24.987494052049, "spins": 1 }] }))
+(expect-failure "CF-10f bob's big at ITS own maximum beside it is refused by the table limit (charge 1999.99843858132 over 980.4997498810411, model)"
+  "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.BOBBY { "entries": [{ "machine": 2, "stake": 3.999679713147, "spins": 1 }] }))
+(rollback-tx)
+;; bob's one-machine board (free-spins 0.05 x 20) opens the round; the headroom left is
+;; shared, and max-stakes publishes each machine's one-board maximum of it
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.BOBBY { "entries": [{ "machine": 4, "stake": 0.05, "spins": 20 }] })
+(expect "CF-10h PRECONDITION bob's board holds one machine" [4]
+  (map (lambda (e:object) (at 'machine e)) (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 c9.BOBBY))))
+(expect "CF-10h1 max-stakes beside it, every machine (model)"
+  [22.438842918521 49.833687271478 3.591721120307 22.438877072665 8.978442841158 7.973720956067]
+  (at 'max-stakes (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status)))
+(rollback-tx)
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.BOBBY { "entries": [{ "machine": 4, "stake": 0.05, "spins": 20 }] })
+(expect "CF-10h.0a machine 0's published maximum 22.438842918521 beside it is accepted verbatim" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE { "entries": [{ "machine": 0, "stake": 22.438842918521, "spins": 1 }] }))
+(rollback-tx)
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.BOBBY { "entries": [{ "machine": 4, "stake": 0.05, "spins": 20 }] })
+(expect-failure "CF-10h.0b and one unit more is refused by the table limit"
+  "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE { "entries": [{ "machine": 0, "stake": 22.438842918522, "spins": 1 }] }))
+(rollback-tx)
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.BOBBY { "entries": [{ "machine": 4, "stake": 0.05, "spins": 20 }] })
+(expect "CF-10h.1a machine 1's published maximum 49.833687271478 beside it is accepted verbatim" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE { "entries": [{ "machine": 1, "stake": 49.833687271478, "spins": 1 }] }))
+(rollback-tx)
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.BOBBY { "entries": [{ "machine": 4, "stake": 0.05, "spins": 20 }] })
+(expect-failure "CF-10h.1b and one unit more is refused by the table limit"
+  "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE { "entries": [{ "machine": 1, "stake": 49.833687271479, "spins": 1 }] }))
+(rollback-tx)
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.BOBBY { "entries": [{ "machine": 4, "stake": 0.05, "spins": 20 }] })
+(expect "CF-10h.2a machine 2's published maximum 3.591721120307 beside it is accepted verbatim" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE { "entries": [{ "machine": 2, "stake": 3.591721120307, "spins": 1 }] }))
+(rollback-tx)
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.BOBBY { "entries": [{ "machine": 4, "stake": 0.05, "spins": 20 }] })
+(expect-failure "CF-10h.2b and one unit more is refused by the table limit"
+  "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE { "entries": [{ "machine": 2, "stake": 3.591721120308, "spins": 1 }] }))
+(rollback-tx)
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.BOBBY { "entries": [{ "machine": 4, "stake": 0.05, "spins": 20 }] })
+(expect "CF-10h.3a machine 3's published maximum 22.438877072665 beside it is accepted verbatim" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE { "entries": [{ "machine": 3, "stake": 22.438877072665, "spins": 1 }] }))
+(rollback-tx)
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.BOBBY { "entries": [{ "machine": 4, "stake": 0.05, "spins": 20 }] })
+(expect-failure "CF-10h.3b and one unit more is refused by the table limit"
+  "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE { "entries": [{ "machine": 3, "stake": 22.438877072666, "spins": 1 }] }))
+(rollback-tx)
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.BOBBY { "entries": [{ "machine": 4, "stake": 0.05, "spins": 20 }] })
+(expect "CF-10h.4a machine 4's published maximum 8.978442841158 beside it is accepted verbatim" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE { "entries": [{ "machine": 4, "stake": 8.978442841158, "spins": 1 }] }))
+(rollback-tx)
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.BOBBY { "entries": [{ "machine": 4, "stake": 0.05, "spins": 20 }] })
+(expect-failure "CF-10h.4b and one unit more is refused by the table limit"
+  "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE { "entries": [{ "machine": 4, "stake": 8.978442841159, "spins": 1 }] }))
+(rollback-tx)
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.BOBBY { "entries": [{ "machine": 4, "stake": 0.05, "spins": 20 }] })
+(expect "CF-10h.5a machine 5's published maximum 7.973720956067 beside it is accepted verbatim" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE { "entries": [{ "machine": 5, "stake": 7.973720956067, "spins": 1 }] }))
+(rollback-tx)
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.BOBBY { "entries": [{ "machine": 4, "stake": 0.05, "spins": 20 }] })
+(expect-failure "CF-10h.5b and one unit more is refused by the table limit"
+  "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet c9.ALICE { "entries": [{ "machine": 5, "stake": 7.973720956068, "spins": 1 }] }))
+(rollback-tx)
+(env-sigs [])
+
+(print "slots cap-floor suite complete: both operands of the table limit are pinned, and every machine's published maximum is exact")

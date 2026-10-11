@@ -1,0 +1,479 @@
+;; slots-crank-interface.repl — the exports and row fields the shared helper
+;; (crank/game-crank.mjs) relies on, pinned so this game cannot drift from
+;; the others without a test going red.
+;;
+;; The helper makes exactly these calls and reads exactly these fields:
+;;   get-params        -> round-seq, last-beacon
+;;   get-round seq     -> state ("open" until settled or voided), liability, drand-round
+;;   round-boards seq  -> [{account (string), claimed (bool), ...}]
+;;   resolve seq sig   -> permissionless, one per transaction; the result is only logged
+;;   prove-liveness rnd sig
+;;   claim seq account -> pays the board's own account
+;;   pot-status        -> an object (printed whole by the helper's self-test)
+;; The messages the helper branches on are pinned verbatim: a rewording would make
+;; it treat a race as a refusal, or a refusal as a transport failure.
+;;
+;; THE SLOTS DIFFERENCE. The helper's dry run skips a board whose claim ABORTS with
+;; "nothing to claim". In slots a loser's claim does NOT abort: it succeeds and
+;; returns "settled: nothing to claim, this board did not win". So the helper's
+;; dry run SUCCEEDS for a loser, the loser is approved, batched and settled like a
+;; winner -- and that settlement is what releases the loser's reserve. Were the
+;; loser skipped, its 40 x total would stay reserved forever and the round's
+;; liability would never reach 0, which is the helper's own "done" memo. CI-10
+;; pins that the loser settles; CI-11c pins that liability reaches 0 only when
+;; every board, losers included, is settled.
+
+(load "slots-test-init.repl")
+
+(begin-tx)
+(module ci CG (defcap CG () (enforce true "ok"))
+  (defconst ALICE "k:a11ce00000000000000000000000000000000000000000000000000000000001")
+  (defconst BOB   "k:b0b0000000000000000000000000000000000000000000000000000000000002")
+  (defconst CAROL "k:ca40100000000000000000000000000000000000000000000000000000000003")
+  (defconst SIG "0d745db068db9e16379a49f65d76353d721d79fb459d20b33a50e750e5cdb10400af36e03d4a8414b3a86770d1d1e90e85462dce40b3cf5c27f9fdb477b6f6e0")
+  ;; a later genuine beacon, for the liveness call
+  (defconst SIG-LATER "19d1a6c9bf554b87d004b73acccad64cc0b4370735b609369f92a9a53e8a07870651464a0b393ef8c607ff05eab5dd7b870ff5dfafda7140e0e2ed10387d3160"))
+(commit-tx)
+
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.initialize n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT 30000.0)
+(commit-tx)
+(env-sigs [{"key":"h0u5e00000000000000000000000000000000000000000000000000000000004"
+           ,"caps":[(coin.TRANSFER "house-funder" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 15000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.fund-house "house-funder" 15000.0)
+(commit-tx)
+(env-sigs [])
+
+;; before any round: what the helper's startup reads
+(begin-tx)
+(let ((g (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params)))
+  (expect "CI-1 get-params carries round-seq" true (contains 'round-seq g))
+  (expect "CI-1a and last-beacon" true (contains 'last-beacon g))
+  (expect "CI-1b round-seq starts at 0" 0 (at 'round-seq g))
+  (expect "CI-1c last-beacon starts at 0 -- which the helper reads as always stale" 0 (at 'last-beacon g)))
+(expect "CI-2 pot-status is an object the helper can print whole" true
+  (contains 'available (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status)))
+(expect "CI-3 round-boards of an unknown round lists nothing" []
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.round-boards 1))
+(commit-tx)
+
+;; three boards in round 1 (beacon 20801767). Under the round's seed (reproduce.py
+;; `play`): alice 0.1 x 20 wins 9 units (0.9), bob 1.0 x 1 wins 5 units (5.0),
+;; carol 1.0 x 1 stops at [31 56 1] = blank blank bar and wins nothing.
+(env-chain-data { "block-time": (time "2026-09-20T17:43:43Z") })
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER ci.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 2.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet ci.ALICE { "entries": [{ "machine": 0, "stake": 0.1, "spins": 20 }] })
+(commit-tx)
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER ci.BOB (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 1.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet ci.BOB { "entries": [{ "machine": 0, "stake": 1.0, "spins": 1 }] })
+(commit-tx)
+(env-sigs [{"key":"ca40100000000000000000000000000000000000000000000000000000000003"
+           ,"caps":[(coin.TRANSFER ci.CAROL (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 1.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet ci.CAROL { "entries": [{ "machine": 0, "stake": 1.0, "spins": 1 }] })
+(commit-tx)
+(env-sigs [])
+
+;; an open round, as the helper's settle loop reads it
+(begin-tx)
+(let ((r (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)))
+  (expect "CI-4 get-round carries state, exactly \"open\"" "open" (at 'state r))
+  (expect "CI-4a and liability, 0 while open" 0.0 (at 'liability r))
+  (expect "CI-4b and drand-round" 20801767 (at 'drand-round r)))
+(expect "CI-5 round-seq advanced" 1 (at 'round-seq (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params)))
+(let ((bs (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.round-boards 1)))
+  (expect "CI-6 round-boards lists all three boards" 3 (length bs))
+  (expect "CI-6a every board carries account and claimed" []
+    (filter (lambda (b:object) (not (and (contains 'account b) (contains 'claimed b)))) bs))
+  (expect "CI-6b account is a string" ["string" "string" "string"] (map (lambda (b:object) (typeof (at 'account b))) bs))
+  (expect "CI-6c claimed is a bool, false before settlement" [false false false] (map (at 'claimed) bs))
+  (expect "CI-6d claimed's type is bool" ["bool" "bool" "bool"] (map (lambda (b:object) (typeof (at 'claimed b))) bs)))
+(commit-tx)
+;; the helper's dry run of a claim on an unsettled round: this exact message
+(begin-tx)
+(expect-failure "CI-7 a claim before settlement says so in the words the helper matches"
+  "this round has not been settled yet"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 1 ci.ALICE))
+(rollback-tx)
+
+;; betting has closed, the beacon is not yet submitted: the round is STILL "open".
+;; The helper switches on "open" to find rounds to resolve, so no intermediate
+;; state ("closed", "pending") may ever appear.
+(env-chain-data { "block-time": (time "2026-09-20T17:47:00Z") })
+(begin-tx)
+(expect "CI-7a past the close and past the beacon's time, state is exactly \"open\" until resolved" "open"
+  (at 'state (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)))
+(expect "CI-8 resolve is permissionless and returns the seed" 41473200179623307258957694415769443739304335489542769187234381733079227613887
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.resolve 1 ci.SIG))
+(let ((r (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)))
+  (expect "CI-8a the state the helper switches on" "resolved" (at 'state r))
+  (expect "CI-8b liability > 0 puts the round in the pay set: 40 x (2.0 + 1.0 + 1.0)" 160.0 (at 'liability r))
+  (expect "CI-8b1 resolve returns an integer" "integer" (typeof (at 'seed r))))
+(expect "CI-8c last-beacon rose to the round's beacon" 20801767
+  (at 'last-beacon (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params)))
+(commit-tx)
+(begin-tx)
+(expect-failure "CI-9 a second resolve is refused" "this round is already settled"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.resolve 1 ci.SIG))
+(rollback-tx)
+
+;; the claim dry run: a LOSER'S CLAIM SUCCEEDS (see the header) -- the helper
+;; batches it, and settling it releases its reserve
+(begin-tx)
+(expect "CI-10 a loser's claim succeeds and says it settled with nothing to pay"
+  "settled: nothing to claim, this board did not win"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 1 ci.CAROL))
+(expect "CI-10a the loser's board reads claimed" true
+  (at 'claimed (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 ci.CAROL)))
+(expect "CI-10b liability fell by 40 x carol's total 1.0" 120.0
+  (at 'liability (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)))
+(expect "CI-10c the loser was paid nothing: 100000 - 1.0" 99999.0
+  (coin.get-balance ci.CAROL))
+(expect "CI-11 a winner's claim pays the BOARD's account whoever sends it" "paid 0.900000000000"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 1 ci.ALICE))
+(expect "CI-11a1 alice holds 100000 - 2.0 + 0.9" 99998.9 (coin.get-balance ci.ALICE))
+(expect "CI-11b liability is NOT 0 while a board is unsettled: bob's 40.0 remains" 40.0
+  (at 'liability (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)))
+(expect "CI-11b1 and the round still counts one board unsettled" 2
+  (at 'settled (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)))
+(expect "CI-11c the last board settled" "paid 5.000000000000"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 1 ci.BOB))
+(let ((r (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)))
+  (expect "CI-11d liability 0 is the helper's done memo, reached only now" 0.0 (at 'liability r))
+  (expect "CI-11e every board is settled" 3 (at 'settled r)))
+(expect "CI-11f every board reads claimed" [true true true]
+  (map (at 'claimed) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.round-boards 1)))
+(commit-tx)
+(begin-tx)
+(expect-failure "CI-11g a repeat says so in the words the helper matches"
+  "this board has already been claimed"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 1 ci.ALICE))
+(rollback-tx)
+(begin-tx)
+(expect-failure "CI-11h a repeat on a LOSER's settled board says the same"
+  "this board has already been claimed"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 1 ci.CAROL))
+(rollback-tx)
+
+;; liveness, and the race message the helper logs as benign
+(begin-tx)
+(expect "CI-12 prove-liveness records a later beacon" 20802058
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.prove-liveness 20802058 ci.SIG-LATER))
+(expect "CI-12b last-beacon now reads the later beacon" 20802058
+  (at 'last-beacon (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params)))
+(commit-tx)
+(begin-tx)
+(expect-failure "CI-12a the loser of a liveness race is told the record is current"
+  "a later beacon is already on record"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.prove-liveness 20802058 ci.SIG-LATER))
+(rollback-tx)
+
+;; ============================================================================
+;; CI-13  TWO FEE-PAYING RESOLVES CANNOT SHARE ONE TRANSACTION
+;;   Each resolve that pays a fee installs coin.TRANSFER from the pot to the SAME
+;;   revenue account, and a second install of that managed capability in one
+;;   transaction aborts it with "Capability already installed". Liveness only:
+;;   each resolve succeeds alone. The helper sends one resolve per transaction
+;;   (see the header); this pins why, so a batching change goes red here first.
+;;   Two open rounds need two genuine beacons three seconds apart, and the wait can
+;;   never go below 120 s, so the EARLIER round opens under the longer wait:
+;;   round 2 at 17:57:16 under 30 + 180 pins 20802058 (18:00:46) and closes at
+;;   17:57:46; round 3 at 17:58:19 under 30 + 120 pins 20802059 (18:00:49).
+;; ============================================================================
+(begin-tx)
+(module ci2 C2G (defcap C2G () (enforce true "ok"))
+  ;; drand evmnet round 20802059
+  (defconst SIG-NEXT "090610f4d8155e4d56b23988d4f0a0451e42a3cc2c296cf4bc98f5f3bbfed1a811d2467d48083eabef7f856e0e9198166abc9a67de356bee250adf30d4a3c5c7"))
+(commit-tx)
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.set-params 0.02 0.01 30000.0 30.0 180.0)
+(commit-tx)
+(env-chain-data { "block-time": (time "2026-09-20T17:57:16Z") })
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER ci.BOB (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 1.0)]}])
+(begin-tx)
+(expect "CI-13 PRECONDITION bob opens round 2" "bet placed in round 2"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet ci.BOB { "entries": [{ "machine": 0, "stake": 1.0, "spins": 1 }] }))
+(commit-tx)
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.set-params 0.02 0.01 30000.0 30.0 120.0)
+(commit-tx)
+(env-chain-data { "block-time": (time "2026-09-20T17:58:19Z") })
+(env-sigs [{"key":"ca40100000000000000000000000000000000000000000000000000000000003"
+           ,"caps":[(coin.TRANSFER ci.CAROL (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 1.0)]}])
+(begin-tx)
+(expect "CI-13a PRECONDITION carol opens round 3" "bet placed in round 3"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet ci.CAROL { "entries": [{ "machine": 0, "stake": 1.0, "spins": 1 }] }))
+(commit-tx)
+(env-sigs [])
+(env-chain-data { "block-time": (time "2026-09-20T18:01:00Z") })
+(begin-tx)
+(expect "CI-13b PRECONDITION the two rounds pin beacons three seconds apart" [20802058 20802059]
+  [(at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 2))
+   (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 3))])
+(expect "CI-13c PRECONDITION and both owe a fee, so both resolves pay one" true
+  (and (> (at 'fee-owed (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 2)) 0.0)
+       (> (at 'fee-owed (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 3)) 0.0)))
+(rollback-tx)
+(begin-tx)
+(expect-failure "CI-13d two fee-paying resolves in ONE transaction abort it"
+  "Capability already installed"
+  (let ((s2 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.resolve 2 ci.SIG-LATER)))
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.resolve 3 ci2.SIG-NEXT)))
+(rollback-tx)
+(begin-tx)
+(expect "CI-13e CONTROL round 2 resolves alone" "resolved"
+  (let ((s2 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.resolve 2 ci.SIG-LATER)))
+    (at 'state (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 2))))
+(rollback-tx)
+(begin-tx)
+(expect "CI-13f CONTROL and so does round 3" "resolved"
+  (let ((s3 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.resolve 3 ci2.SIG-NEXT)))
+    (at 'state (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 3))))
+(rollback-tx)
+(begin-tx)
+(expect "CI-13g CONTROL the rollbacks left both rounds open" ["open" "open"]
+  [(at 'state (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 2))
+   (at 'state (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 3))])
+(rollback-tx)
+
+;; ============================================================================
+;; CI-14  A MIXED ROUND: THE HELPER'S CONTRACT HOLDS ON EVERY MACHINE KIND
+;;   The helper never reads a board's machine: it resolves "open" rounds, dry-runs
+;;   a claim for every unclaimed board and stops at liability 0. So a round
+;;   holding the classic (line, 0), the wild (3) and the free-spins (4) machines
+;;   must behave exactly like a classic one: a LOSER's claim succeeds on every
+;;   kind, and liability reaches 0 only when every board, losers included, is
+;;   settled. Six one-spin boards of 0.5: for each machine one loser and one
+;;   winner. Round 4 opens at 18:03:58 under 30 + 120 and pins 20802172
+;;   (18:06:28). Outcomes from the independent oracle (oracle6.py over the
+;;   independent model, seed reproduced off chain by seed.py = drand verified-seed):
+;;   seed 23011129448371385004482817351309905591186562147144971240596972175103987222161;
+;;   alice / bob / carol lose on machines 0 / 3 / 4 (0 units); W0 stops [13 52 43],
+;;   W3 [25 14 29] and W4 [7 32 61] each win 2 units, paid 1.0.
+;;   Liability after resolve = 0.5 x (40 + 40 + 40 + 40 + 100 + 100) = 180.
+;; ============================================================================
+(env-data
+  { "w0-ks": { "keys": ["c000000000000000000000000000000000000000000000000000000000000001"], "pred": "keys-all" }
+  , "w3-ks": { "keys": ["c300000000000000000000000000000000000000000000000000000000000001"], "pred": "keys-all" }
+  , "w4-ks": { "keys": ["c400000000000000000000000000000000000000000000000000000000000002"], "pred": "keys-all" } })
+(begin-tx)
+(module ci3 C3G (defcap C3G () (enforce true "ok"))
+  (defconst W0 "k:c000000000000000000000000000000000000000000000000000000000000001")
+  (defconst W3 "k:c300000000000000000000000000000000000000000000000000000000000001")
+  (defconst W4 "k:c400000000000000000000000000000000000000000000000000000000000002")
+  ;; drand evmnet round 20802172
+  (defconst SIG3 "1f5b04f99e8ed51bbe06ffd960a7e6e421465bd5e0e873aade49e236a3131f06000addb82c5de70f69d0305dbb2a99d88da2d527bdd7ce9fd307263727445361"))
+(test-capability (coin.COINBASE))
+(coin.coinbase ci3.W0 (read-keyset "w0-ks") 100.0)
+(coin.coinbase ci3.W3 (read-keyset "w3-ks") 100.0)
+(coin.coinbase ci3.W4 (read-keyset "w4-ks") 100.0)
+(commit-tx)
+(env-chain-data { "block-time": (time "2026-09-20T18:03:58Z") })
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER ci.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 0.5)]}])
+(begin-tx)
+(expect "CI-14 PRECONDITION ci.ALICE places a machine-0 board in round 4" "bet placed in round 4"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet ci.ALICE { "entries": [{ "machine": 0, "stake": 0.5, "spins": 1 }] }))
+(commit-tx)
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER ci.BOB (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 0.5)]}])
+(begin-tx)
+(expect "CI-14 PRECONDITION ci.BOB places a machine-3 board in round 4" "bet placed in round 4"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet ci.BOB { "entries": [{ "machine": 3, "stake": 0.5, "spins": 1 }] }))
+(commit-tx)
+(env-sigs [{"key":"ca40100000000000000000000000000000000000000000000000000000000003"
+           ,"caps":[(coin.TRANSFER ci.CAROL (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 0.5)]}])
+(begin-tx)
+(expect "CI-14 PRECONDITION ci.CAROL places a machine-4 board in round 4" "bet placed in round 4"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet ci.CAROL { "entries": [{ "machine": 4, "stake": 0.5, "spins": 1 }] }))
+(commit-tx)
+(env-sigs [{"key":"c000000000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER ci3.W0 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 0.5)]}])
+(begin-tx)
+(expect "CI-14 PRECONDITION ci3.W0 places a machine-0 board in round 4" "bet placed in round 4"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet ci3.W0 { "entries": [{ "machine": 0, "stake": 0.5, "spins": 1 }] }))
+(commit-tx)
+(env-sigs [{"key":"c300000000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER ci3.W3 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 0.5)]}])
+(begin-tx)
+(expect "CI-14 PRECONDITION ci3.W3 places a machine-3 board in round 4" "bet placed in round 4"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet ci3.W3 { "entries": [{ "machine": 3, "stake": 0.5, "spins": 1 }] }))
+(commit-tx)
+(env-sigs [{"key":"c400000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER ci3.W4 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 0.5)]}])
+(begin-tx)
+(expect "CI-14 PRECONDITION ci3.W4 places a machine-4 board in round 4" "bet placed in round 4"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet ci3.W4 { "entries": [{ "machine": 4, "stake": 0.5, "spins": 1 }] }))
+(commit-tx)
+(env-sigs [])
+(begin-tx)
+(expect "CI-14a PRECONDITION round 4 pins beacon 20802172" 20802172 (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 4)))
+(expect "CI-14b round-boards lists six boards, whatever their machine" 6 (length (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.round-boards 4)))
+(expect "CI-14c and each still carries account and a false claimed" [false false false false false false]
+  (map (at 'claimed) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.round-boards 4)))
+(expect "CI-14d the machines in the round, by account order" [[0] [3] [4] [0] [3] [4]]
+  (map (lambda (acct:string) (map (at 'machine) (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 4 acct)))) [ci.ALICE ci.BOB ci.CAROL ci3.W0 ci3.W3 ci3.W4]))
+(commit-tx)
+(env-chain-data { "block-time": (time "2026-09-20T18:07:00Z") })
+(begin-tx)
+(expect "CI-14e resolve returns the seed the oracle used"
+  23011129448371385004482817351309905591186562147144971240596972175103987222161
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.resolve 4 ci3.SIG3))
+(expect "CI-14f liability is every board's machine maximum x its total" 180.0 (at 'liability (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 4)))
+(commit-tx)
+(begin-tx)
+(expect "CI-14g a loser on the CLASSIC machine settles" "settled: nothing to claim, this board did not win"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 4 ci.ALICE))
+(expect "CI-14g1 releasing 40 x 0.5" 160.0 (at 'liability (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 4)))
+(expect "CI-14h a loser on the WILD machine settles" "settled: nothing to claim, this board did not win"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 4 ci.BOB))
+(expect "CI-14h1 releasing 40 x 0.5" 140.0 (at 'liability (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 4)))
+(expect "CI-14i a loser on the FREE-SPINS machine settles" "settled: nothing to claim, this board did not win"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 4 ci.CAROL))
+(expect "CI-14i1 releasing 100 x 0.5" 90.0 (at 'liability (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 4)))
+(expect "CI-14i2 the losers' stops are the oracle's, and each settled at 0.0" [[25 34 56] [52 23 42] [7 40 41] 0.0 0.0 0.0]
+  [(at 'stops (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 4 ci.ALICE)) (at 'stops (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 4 ci.BOB)) (at 'stops (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 4 ci.CAROL))
+   (at 'payout (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 4 ci.ALICE)) (at 'payout (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 4 ci.BOB)) (at 'payout (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 4 ci.CAROL))])
+;; balances over the whole file: alice 100000 - 2.0 + 0.9 - 0.5; bob 100000 - 1.0
+;; + 5.0 - 1.0 (round 2, still open) - 0.5; carol 100000 - 1.0 - 1.0 (round 3,
+;; still open) - 0.5. Nothing from round 4 reached any of them.
+(expect "CI-14i3 the losers were paid nothing in round 4" [99998.4 100002.5 99997.5]
+  [(coin.get-balance ci.ALICE) (coin.get-balance ci.BOB) (coin.get-balance ci.CAROL)])
+(commit-tx)
+(begin-tx)
+(expect "CI-14j a classic winner is paid 2 units of 0.5" "paid 1.000000000000" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 4 ci3.W0))
+(expect "CI-14j1 liability is not 0 while boards remain" 70.0 (at 'liability (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 4)))
+(expect "CI-14k a wild winner is paid" "paid 1.000000000000" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 4 ci3.W3))
+(expect "CI-14k1 liability is STILL not 0: the free-spins board holds 50" 50.0 (at 'liability (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 4)))
+(expect "CI-14k2 and one board is unsettled" 5 (at 'settled (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 4)))
+(expect "CI-14l the last board, on the free-spins machine, settles" "paid 1.000000000000" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 4 ci3.W4))
+(expect "CI-14l1 liability 0 is reached only now" 0.0 (at 'liability (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 4)))
+(expect "CI-14l2 every board is settled" 6 (at 'settled (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 4)))
+(expect "CI-14l3 the winners' stops are the oracle's" [[13 52 43] [25 14 29] [7 32 61]]
+  [(at 'stops (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 4 ci3.W0)) (at 'stops (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 4 ci3.W3)) (at 'stops (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 4 ci3.W4))])
+(expect "CI-14l4 each winner holds 100 - 0.5 + 1.0" [100.5 100.5 100.5]
+  [(coin.get-balance ci3.W0) (coin.get-balance ci3.W3) (coin.get-balance ci3.W4)])
+(commit-tx)
+(begin-tx)
+(expect-failure "CI-14m a repeat on a settled free-spins loser says the words the helper matches"
+  "this board has already been claimed"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 4 ci.CAROL))
+(rollback-tx)
+;; ============================================================================
+;; CI-15  A ROUND OF ONE-MACHINE BOARDS: EVERY ROW ABOVE STILL HOLDS
+;;   A board keeps its list shape and holds exactly one machine; the helper's view is
+;;   unchanged: one board per account, one `claim seq account`, the same seven fields and
+;;   messages. Round 5 opens at 17:43:43 and pins 20801767 (round 4 is resolved, so a bet
+;;   opens the next round). Three boards:
+;;     L5    classic 0.1 x 2 -- a LOSER (0 units); reserve 40 x 0.2 = 8.0
+;;     ALICE wild 0.1 x 3: units 2, paid 0.2; reserve 40 x 0.3 = 12.0
+;;     W5    tumble 0.1 x 2: units 7, paid 0.1 x 7 / 5 = 0.14; reserve 112.6 x 0.2 = 22.52
+;;   Outcomes and stops from the second independent oracle; seed = drand
+;;   verified-seed recomputed off chain. Liability after resolve 8.0 + 12.0 + 22.52 = 42.52.
+;; ============================================================================
+(env-data
+  { "l5-ks": { "keys": ["c500000000000000000000000000000000000000000000000000000000000001"], "pred": "keys-all" }
+  , "w5-ks": { "keys": ["c50000000000000000000000000000000000000000000000000000000000000f"], "pred": "keys-all" } })
+(begin-tx)
+(module ci4 C4G (defcap C4G () (enforce true "ok"))
+  (defconst L5 "k:c500000000000000000000000000000000000000000000000000000000000001")
+  (defconst W5 "k:c50000000000000000000000000000000000000000000000000000000000000f"))
+(test-capability (coin.COINBASE))
+(coin.coinbase ci4.L5 (read-keyset "l5-ks") 100.0)
+(coin.coinbase ci4.W5 (read-keyset "w5-ks") 100.0)
+(commit-tx)
+(env-chain-data { "block-time": (time "2026-09-20T17:43:43Z") })
+(env-sigs [{"key":"c500000000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER ci4.L5 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 0.2)]}])
+(begin-tx)
+(expect-failure "CI-15 a three-machine board is refused in the words the page shows" "a board plays one machine: it holds exactly one entry"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet ci4.L5 { "entries": [{ "machine": 0, "stake": 0.1, "spins": 2 }, { "machine": 3, "stake": 0.1, "spins": 2 }, { "machine": 4, "stake": 0.1, "spins": 2 }] }))
+(commit-tx)
+(begin-tx)
+(expect "CI-15 PRECONDITION ci4.L5 opens round 5 with a one-machine board" "bet placed in round 5"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet ci4.L5 { "entries": [{ "machine": 0, "stake": 0.1, "spins": 2 }] }))
+(commit-tx)
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER ci.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 0.3)]}])
+(begin-tx)
+(expect "CI-15 PRECONDITION ci.ALICE joins with a one-machine board" "bet placed in round 5"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet ci.ALICE { "entries": [{ "machine": 3, "stake": 0.1, "spins": 3 }] }))
+(commit-tx)
+(env-sigs [{"key":"c50000000000000000000000000000000000000000000000000000000000000f"
+           ,"caps":[(coin.TRANSFER ci4.W5 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 0.2)]}])
+(begin-tx)
+(expect "CI-15 PRECONDITION ci4.W5 joins with a tumble board" "bet placed in round 5"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet ci4.W5 { "entries": [{ "machine": 5, "stake": 0.1, "spins": 2 }] }))
+(commit-tx)
+(env-sigs [])
+;; the rows the helper reads while the round is open
+(begin-tx)
+(let ((r (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 5)))
+  (expect "CI-15a get-round: state exactly \"open\"" "open" (at 'state r))
+  (expect "CI-15b liability 0 while open" 0.0 (at 'liability r))
+  (expect "CI-15c drand-round" 20801767 (at 'drand-round r)))
+(expect "CI-15d round-seq advanced to 5" 5 (at 'round-seq (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params)))
+(let ((bs (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.round-boards 5)))
+  (expect "CI-15e round-boards lists one row per board: three" 3 (length bs))
+  (expect "CI-15f every row carries account and claimed" []
+    (filter (lambda (b:object) (not (and (contains 'account b) (contains 'claimed b)))) bs))
+  (expect "CI-15g account is a string on every row" ["string" "string" "string"] (map (lambda (b:object) (typeof (at 'account b))) bs))
+  (expect "CI-15h claimed is a bool, false before settlement" [false false false] (map (at 'claimed) bs))
+  (expect "CI-15i and so is its type" ["bool" "bool" "bool"] (map (lambda (b:object) (typeof (at 'claimed b))) bs)))
+(commit-tx)
+(begin-tx)
+(expect-failure "CI-15j a claim before settlement says so in the words the helper matches"
+  "this round has not been settled yet"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 5 ci4.L5))
+(rollback-tx)
+(env-chain-data { "block-time": (time "2026-09-20T17:47:00Z") })
+(begin-tx)
+(expect "CI-15k past the beacon's time the state is still exactly \"open\"" "open" (at 'state (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 5)))
+(expect "CI-15l resolve is permissionless and returns the seed the oracle used"
+  37668096285646320199641060908126814027211093282206467583149606883500438862613
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.resolve 5 ci.SIG))
+(let ((r (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 5)))
+  (expect "CI-15m the state the helper switches on" "resolved" (at 'state r))
+  (expect "CI-15n liability is every board's booked reserve, summed" 42.52 (at 'liability r)))
+(commit-tx)
+(begin-tx)
+(expect-failure "CI-15o a second resolve is refused" "this round is already settled"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.resolve 5 ci.SIG))
+(rollback-tx)
+;; 🔴 the LOSER's claim succeeds: the helper batches it like a winner
+(begin-tx)
+(expect "CI-15p a loser's claim succeeds and says it settled with nothing to pay"
+  "settled: nothing to claim, this board did not win"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 5 ci4.L5))
+(expect "CI-15q at the oracle's stops, three per spin, and 0.0"
+  [true [55 63 27 49 50 57] 0.0]
+  (let ((b (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 5 ci4.L5))) [(at 'claimed b) (at 'stops b) (at 'payout b)]))
+(expect "CI-15r liability fell by exactly the loser's booked 8.0" 34.52 (at 'liability (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 5)))
+(expect "CI-15s the loser was paid nothing: 100 - 0.2" 99.8 (coin.get-balance ci4.L5))
+(expect "CI-15t a one-machine winner in the same round is paid" "paid 0.200000000000" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 5 ci.ALICE))
+(expect "CI-15u at the oracle's stops" [6 1 38 61 41 41 47 7 26] (at 'stops (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 5 ci.ALICE)))
+(expect "CI-15v liability is NOT 0 while a board is unsettled: W5's 22.52 remains" 22.52 (at 'liability (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 5)))
+(expect "CI-15w and the round still counts one board unsettled" 2 (at 'settled (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 5)))
+(expect "CI-15x the tumble winner is paid" "paid 0.140000000000" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 5 ci4.W5))
+(expect "CI-15y at the oracle's stops" [2 60 21 60 24 35] (at 'stops (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 5 ci4.W5)))
+(expect "CI-15z W5 holds 100 - 0.2 + 0.14" 99.94 (coin.get-balance ci4.W5))
+(let ((r (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 5)))
+  (expect "CI-15z1 liability 0 is the helper's done memo, reached only now" 0.0 (at 'liability r))
+  (expect "CI-15z2 every board is settled" 3 (at 'settled r)))
+(expect "CI-15z3 every row reads claimed" [true true true] (map (at 'claimed) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.round-boards 5)))
+(commit-tx)
+(begin-tx)
+(expect-failure "CI-15z4 a repeat on the loser's board says the words the helper matches"
+  "this board has already been claimed"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 5 ci4.L5))
+(rollback-tx)
+(print "crank interface: every export and field the shared helper relies on is present")

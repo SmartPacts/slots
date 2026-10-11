@@ -1,0 +1,16 @@
+{
+  "name": "game-crank",
+  "private": true,
+  "type": "module",
+  "description": "Resolver, drand-liveness and payout bot for one drand-settled game module per process (GAME, CRANK_MOD). Holds no privilege; signs coin.GAS only. Run at least two per game on separate machines.",
+  "scripts": {
+    "crank": "node game-crank.mjs",
+    "once": "node game-crank.mjs --once",
+    "keygen": "node crank-keygen.mjs",
+    "backup": "node key-backup.mjs"
+  },
+  "dependencies": {
+    "@kadena/client": "^1.18.3",
+    "@kadena/cryptography-utils": "^0.4.4"
+  }
+}

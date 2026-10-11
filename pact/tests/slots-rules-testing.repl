@@ -1,0 +1,1191 @@
+;; slots-rules-testing.repl — the six MACHINES' RULES, pinned against independent literals, for
+;; n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.
+;;
+;; What a player is promised is each machine's strip, its paytable, the return they add up to,
+;; the most one spin can pay, and the recipe that turns a beacon into reel stops. Every one is
+;; pinned here against a LITERAL produced outside this module, never against the constant under
+;; test. Pure functions only: no round is opened, no coin moves.
+;;
+;;   M1  the machines: MACHINE-COUNT, SYMBOL-CODES, each MACHINES entry field by field, each
+;;       strip's symbol counts recounted by this file's own fold over the literal strip, where
+;;       code 5 may appear, and the neighbour property per strip
+;;   M2  the exact return of every machine: RETURNS, recomputed here for the line and wild
+;;       machines from the literal counts and a literal 216-entry pay list, the reduced fractions
+;;       by cross-multiplication, EDGES, MAX-MULTS, and the smallest win of each machine
+;;   M3  the evaluators: spin-units on 56 keys per machine against the oracle, every paytable
+;;       category through line-pay / wild-pay, free-look, tumble-units with traced cascades, and
+;;       the beacon-to-reels recipe (board-seed, spin-key, key-stops, play-board) per machine
+;;   M4  the cap never binds: line/wild maximum over the 216 triples, the free-spins
+;;       no-line-on-trigger property over all 64 stops, tumble's enumerated maximum; each with a
+;;       control proving the check can fail
+;;   M5  a board of several machines: play-entries on four multi-entry boards (one on
+;;       all six machines) with spins numbered across entries, pinned stop for stop; a one-entry
+;;       board equals play-board; entries-reserve and entries-fee as per-entry sums (M5's own
+;;       provenance note says how its literals were produced)
+;;
+;; HOW THE LITERALS WERE PRODUCED. Python 3 only, never this module. A generator (`gen.py`)
+;; writes this file from `rules_oracle.py`, `boards.py` and `hunt.py`, which import an
+;; independent Python model of the machines written from their specification. Those scripts
+;; are not published; the file names below say which part of that model each literal came from:
+;;   - strips: `a_final.py` (classic = its `live` strip; easy = layout({4:2,3:4,2:10,1:12,0:36});
+;;     big = layout({4:4,3:4,2:8,1:4,0:44})), `e_wild.mk(2)` (wild), `d_free.machine(P, 4)`
+;;     (free-spins), `f_cascade.build({4:4,3:8,2:14,1:22,0:16})` (tumble);
+;;   - pays: the P tuples of `a_final.py`, `e_wild40.py` (printed "pays (20, 8, 6, 15, 5, 2, 2, 40)"),
+;;     the `d_free.py 40,20,10,10,5,3,2 4 8 2 24 100` argument, `f_cascade.py 5 x "{4:4,3:8,2:14,1:22,0:16}"`
+;;     (printed "line pays C/L/B/7 = (7, 18, 35, 80)"); padded with 0 to eight slots (slot 7 is
+;;     the wild's three-wild pay and is unused by the other kinds);
+;;   - pay lists: `common.pay3` (a scatter or wild code 5 read as a blank on a line machine, where
+;;     its count is 0) and `e_wild.mkpay(P, 'double')`, over the 216 triples a outermost;
+;;   - returns: the weighted sums over those lists (asserted equal to a brute force over all
+;;     262,144 stop triples); free-spins = the RTP fraction printed by the `d_free.py` command
+;;     above, copied programmatically; tumble = "RTP=19651/20480" and "max=563/5" printed by the
+;;     `f_cascade.py` command above, re-asserted by rules_oracle.py's own enumeration;
+;;   - per-key units: common.pay3 / e_wild.mkpay / f_cascade.simulate / d_free's bonus recursion
+;;     walked for one key; all 424 keys x 6 machines of `diff/py.json` reproduced exactly;
+;;   - hashes and stops: `reproduce.py` (BLAKE2b-256, base64url unpadded, big-endian integer,
+;;     stops = [h mod 64, (h div 64) mod 64, (h div 4096) mod 64]).
+
+(load "slots-test-init.repl")
+
+;; ============================================================================
+;; Harness module (test-only; never deployed)
+;; ============================================================================
+;; WHY: the literals and the independent folds over them need a module to live in. Nothing
+;; here reads a slots constant; every figure is computed from the literals below.
+(begin-tx "define the rules harness")
+(namespace "smartpacts")
+(module srules GG
+  (defcap GG () (enforce true "ok"))
+  ; machine 0 (classic): strip stop 0 to 63, and its pays
+  (defconst REEL-0:[integer]
+    [ 4 3 0 2 0 1 0 0 0 3 0 2 0 1 0 0 0 3 0 2 0 1 0 0 0 3 0 2 0 1 0 0
+      4 3 0 2 0 1 0 0 0 3 0 2 0 1 0 0 0 3 0 2 0 1 0 0 0 3 0 2 0 1 0 0 ])
+  (defconst PAYS-0:[integer] [40 20 10 15 5 5 2 0])
+  ; machine 1 (easy): strip stop 0 to 63, and its pays
+  (defconst REEL-1:[integer]
+    [ 4 3 2 1 0 0 0 2 1 0 0 0 1 2 0 0 3 0 1 0 2 0 0 1 0 0 2 0 1 0 0 0
+      4 3 2 1 0 0 0 2 1 0 0 0 1 2 0 0 3 0 1 0 2 0 0 1 0 0 2 0 1 0 0 0 ])
+  (defconst PAYS-1:[integer] [18 6 2 2 2 2 2 0])
+  ; machine 2 (big): strip stop 0 to 63, and its pays
+  (defconst REEL-2:[integer]
+    [ 4 3 1 2 0 0 0 0 0 2 0 0 0 0 0 0 4 3 1 2 0 0 0 0 0 2 0 0 0 0 0 0
+      4 3 1 2 0 0 0 0 0 2 0 0 0 0 0 0 4 3 1 2 0 0 0 0 0 2 0 0 0 0 0 0 ])
+  (defconst PAYS-2:[integer] [250 100 30 30 8 4 4 0])
+  ; machine 3 (wild): strip stop 0 to 63, and its pays
+  (defconst REEL-3:[integer]
+    [ 4 3 0 2 0 1 0 0 0 3 0 2 0 1 0 0 0 3 5 2 0 1 0 0 0 3 0 2 0 1 0 0
+      4 3 0 2 0 1 0 0 0 3 0 2 0 1 0 0 0 3 5 2 0 1 0 0 0 3 0 2 0 1 0 0 ])
+  (defconst PAYS-3:[integer] [20 8 6 15 5 2 2 40])
+  ; machine 4 (free-spins): strip stop 0 to 63, and its pays
+  (defconst REEL-4:[integer]
+    [ 4 3 0 2 0 1 0 5 0 3 0 2 0 1 0 0 0 3 0 2 0 1 0 5 0 3 0 2 0 1 0 0
+      4 3 0 2 0 1 0 5 0 3 0 2 0 1 0 0 0 3 0 2 0 1 0 5 0 3 0 2 0 1 0 0 ])
+  (defconst PAYS-4:[integer] [40 20 10 10 5 3 2 0])
+  ; machine 5 (tumble): strip stop 0 to 63, and its pays
+  (defconst REEL-5:[integer]
+    [ 4 3 2 1 1 2 0 1 3 0 2 1 1 0 2 1 4 3 0 2 1 0 1 2 3 1 0 1 2 0 1 0
+      4 3 2 1 1 2 0 1 3 0 2 1 1 0 2 1 4 3 0 2 1 0 1 2 3 1 0 1 2 0 1 0 ])
+  (defconst PAYS-5:[integer] [7 18 35 80 0 0 0 0])
+
+  ; the 216 ordered triples of symbol codes 0..5, a outermost, c innermost
+  (defconst TRIPLES-LIT:[[integer]]
+    [ [0 0 0] [0 0 1] [0 0 2] [0 0 3] [0 0 4] [0 0 5] [0 1 0] [0 1 1] [0 1 2] [0 1 3] [0 1 4] [0 1 5]
+      [0 2 0] [0 2 1] [0 2 2] [0 2 3] [0 2 4] [0 2 5] [0 3 0] [0 3 1] [0 3 2] [0 3 3] [0 3 4] [0 3 5]
+      [0 4 0] [0 4 1] [0 4 2] [0 4 3] [0 4 4] [0 4 5] [0 5 0] [0 5 1] [0 5 2] [0 5 3] [0 5 4] [0 5 5]
+      [1 0 0] [1 0 1] [1 0 2] [1 0 3] [1 0 4] [1 0 5] [1 1 0] [1 1 1] [1 1 2] [1 1 3] [1 1 4] [1 1 5]
+      [1 2 0] [1 2 1] [1 2 2] [1 2 3] [1 2 4] [1 2 5] [1 3 0] [1 3 1] [1 3 2] [1 3 3] [1 3 4] [1 3 5]
+      [1 4 0] [1 4 1] [1 4 2] [1 4 3] [1 4 4] [1 4 5] [1 5 0] [1 5 1] [1 5 2] [1 5 3] [1 5 4] [1 5 5]
+      [2 0 0] [2 0 1] [2 0 2] [2 0 3] [2 0 4] [2 0 5] [2 1 0] [2 1 1] [2 1 2] [2 1 3] [2 1 4] [2 1 5]
+      [2 2 0] [2 2 1] [2 2 2] [2 2 3] [2 2 4] [2 2 5] [2 3 0] [2 3 1] [2 3 2] [2 3 3] [2 3 4] [2 3 5]
+      [2 4 0] [2 4 1] [2 4 2] [2 4 3] [2 4 4] [2 4 5] [2 5 0] [2 5 1] [2 5 2] [2 5 3] [2 5 4] [2 5 5]
+      [3 0 0] [3 0 1] [3 0 2] [3 0 3] [3 0 4] [3 0 5] [3 1 0] [3 1 1] [3 1 2] [3 1 3] [3 1 4] [3 1 5]
+      [3 2 0] [3 2 1] [3 2 2] [3 2 3] [3 2 4] [3 2 5] [3 3 0] [3 3 1] [3 3 2] [3 3 3] [3 3 4] [3 3 5]
+      [3 4 0] [3 4 1] [3 4 2] [3 4 3] [3 4 4] [3 4 5] [3 5 0] [3 5 1] [3 5 2] [3 5 3] [3 5 4] [3 5 5]
+      [4 0 0] [4 0 1] [4 0 2] [4 0 3] [4 0 4] [4 0 5] [4 1 0] [4 1 1] [4 1 2] [4 1 3] [4 1 4] [4 1 5]
+      [4 2 0] [4 2 1] [4 2 2] [4 2 3] [4 2 4] [4 2 5] [4 3 0] [4 3 1] [4 3 2] [4 3 3] [4 3 4] [4 3 5]
+      [4 4 0] [4 4 1] [4 4 2] [4 4 3] [4 4 4] [4 4 5] [4 5 0] [4 5 1] [4 5 2] [4 5 3] [4 5 4] [4 5 5]
+      [5 0 0] [5 0 1] [5 0 2] [5 0 3] [5 0 4] [5 0 5] [5 1 0] [5 1 1] [5 1 2] [5 1 3] [5 1 4] [5 1 5]
+      [5 2 0] [5 2 1] [5 2 2] [5 2 3] [5 2 4] [5 2 5] [5 3 0] [5 3 1] [5 3 2] [5 3 3] [5 3 4] [5 3 5]
+      [5 4 0] [5 4 1] [5 4 2] [5 4 3] [5 4 4] [5 4 5] [5 5 0] [5 5 1] [5 5 2] [5 5 3] [5 5 4] [5 5 5] ])
+  ; machine 0: the oracle's pay for each of TRIPLES-LIT, in order
+  (defconst LIST-0:[integer]
+    [ 0 2 0 0 0 0 2 5 2 2 2 2 0 2 0 0 0 0 0 2 0 0 0 0 0 2 0 0 0 0 0 2 0 0 0 0
+      2 5 2 2 2 2 5 15 5 5 5 5 2 5 2 2 2 2 2 5 2 2 2 2 2 5 2 2 2 2 2 5 2 2 2 2
+      0 2 0 0 0 0 2 5 2 2 2 2 0 2 10 5 5 0 0 2 5 5 5 0 0 2 5 5 5 0 0 2 0 0 0 0
+      0 2 0 0 0 0 2 5 2 2 2 2 0 2 5 5 5 0 0 2 5 20 5 0 0 2 5 5 5 0 0 2 0 0 0 0
+      0 2 0 0 0 0 2 5 2 2 2 2 0 2 5 5 5 0 0 2 5 5 5 0 0 2 5 5 40 0 0 2 0 0 0 0
+      0 2 0 0 0 0 2 5 2 2 2 2 0 2 0 0 0 0 0 2 0 0 0 0 0 2 0 0 0 0 0 2 0 0 0 0 ])
+  ; machine 1: the oracle's pay for each of TRIPLES-LIT, in order
+  (defconst LIST-1:[integer]
+    [ 0 2 0 0 0 0 2 2 2 2 2 2 0 2 0 0 0 0 0 2 0 0 0 0 0 2 0 0 0 0 0 2 0 0 0 0
+      2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2
+      0 2 0 0 0 0 2 2 2 2 2 2 0 2 2 2 2 0 0 2 2 2 2 0 0 2 2 2 2 0 0 2 0 0 0 0
+      0 2 0 0 0 0 2 2 2 2 2 2 0 2 2 2 2 0 0 2 2 6 2 0 0 2 2 2 2 0 0 2 0 0 0 0
+      0 2 0 0 0 0 2 2 2 2 2 2 0 2 2 2 2 0 0 2 2 2 2 0 0 2 2 2 18 0 0 2 0 0 0 0
+      0 2 0 0 0 0 2 2 2 2 2 2 0 2 0 0 0 0 0 2 0 0 0 0 0 2 0 0 0 0 0 2 0 0 0 0 ])
+  ; machine 2: the oracle's pay for each of TRIPLES-LIT, in order
+  (defconst LIST-2:[integer]
+    [ 0 4 0 0 0 0 4 4 4 4 4 4 0 4 0 0 0 0 0 4 0 0 0 0 0 4 0 0 0 0 0 4 0 0 0 0
+      4 4 4 4 4 4 4 30 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4
+      0 4 0 0 0 0 4 4 4 4 4 4 0 4 30 8 8 0 0 4 8 8 8 0 0 4 8 8 8 0 0 4 0 0 0 0
+      0 4 0 0 0 0 4 4 4 4 4 4 0 4 8 8 8 0 0 4 8 100 8 0 0 4 8 8 8 0 0 4 0 0 0 0
+      0 4 0 0 0 0 4 4 4 4 4 4 0 4 8 8 8 0 0 4 8 8 8 0 0 4 8 8 250 0 0 4 0 0 0 0
+      0 4 0 0 0 0 4 4 4 4 4 4 0 4 0 0 0 0 0 4 0 0 0 0 0 4 0 0 0 0 0 4 0 0 0 0 ])
+  ; machine 3: the oracle's pay for each of TRIPLES-LIT, in order
+  (defconst LIST-3:[integer]
+    [ 0 2 0 0 0 0 2 2 2 2 2 2 0 2 0 0 0 0 0 2 0 0 0 0 0 2 0 0 0 0 0 2 0 0 0 0
+      2 2 2 2 2 2 2 15 2 2 2 30 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 30 2 2 2 30
+      0 2 0 0 0 0 2 2 2 2 2 2 0 2 6 5 5 12 0 2 5 5 5 10 0 2 5 5 5 10 0 2 12 10 10 12
+      0 2 0 0 0 0 2 2 2 2 2 2 0 2 5 5 5 10 0 2 5 8 5 16 0 2 5 5 5 10 0 2 10 16 10 16
+      0 2 0 0 0 0 2 2 2 2 2 2 0 2 5 5 5 10 0 2 5 5 5 10 0 2 5 5 20 40 0 2 10 10 40 40
+      0 2 0 0 0 0 2 30 2 2 2 30 0 2 12 10 10 12 0 2 10 16 10 16 0 2 10 10 40 40 0 30 12 16 40 40 ])
+
+  ; the parity keys: probe|0..29, every hunted key of diff/py.json, and hunt.py's two
+  (defconst KEYS:[string]
+    ["probe|0" "probe|1" "probe|2" "probe|3" "probe|4" "probe|5" "probe|6" "probe|7" "probe|8" "probe|9" "probe|10" "probe|11" "probe|12" "probe|13" "probe|14" "probe|15" "probe|16" "probe|17" "probe|18" "probe|19" "probe|20" "probe|21" "probe|22" "probe|23" "probe|24" "probe|25" "probe|26" "probe|27" "probe|28" "probe|29" "hunt|102" "hunt|2587" "hunt|3115" "hunt|5215" "hunt|5239" "hunt|5833" "hunt|25" "hunt|96" "hunt|244" "hunt|374" "hunt|509" "hunt|516" "hunt|147" "hunt|264" "hunt|419" "hunt|484" "hunt|491" "hunt|577" "hunt|1339" "hunt|98699" "hunt|102803" "hunt|113304" "hunt|122090" "hunt|131535" "hunt|15931" "hunt|440466"])
+  (defconst UNITS-0:[integer] [0 0 0 0 2 0 0 5 0 0 2 0 0 0 0 0 0 2 0 2 0 0 0 0 2 2 0 2 2 2 0 0 0 0 0 0 20 0 20 0 0 10 0 0 0 0 5 0 0 0 0 0 0 0 0 0])
+  (defconst UNITS-1:[integer] [0 2 0 2 2 2 2 0 2 0 0 2 0 0 0 0 0 2 2 0 2 0 2 2 0 0 0 0 2 0 2 2 2 2 2 2 0 2 0 0 2 2 2 2 0 2 0 0 2 2 2 2 2 2 2 0])
+  (defconst UNITS-2:[integer] [0 0 0 0 0 4 0 8 0 0 0 4 0 0 0 0 0 4 0 0 0 4 0 4 0 0 0 0 0 0 4 30 4 4 4 4 8 0 8 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0])
+  (defconst UNITS-3:[integer] [0 0 0 0 2 0 0 5 0 0 2 0 0 0 0 0 0 2 0 2 0 0 0 0 2 2 0 2 2 2 0 40 0 0 0 16 8 0 8 0 0 6 0 0 0 0 5 0 0 0 0 0 0 0 0 0])
+  (defconst UNITS-4:[integer] [0 0 0 0 2 0 0 5 0 0 2 0 0 0 0 0 0 2 0 2 0 0 0 0 2 2 0 2 2 2 0 0 0 0 0 0 20 22 20 22 14 10 0 0 0 0 5 0 60 64 60 84 84 62 38 100])
+  (defconst UNITS-5:[integer] [0 0 0 0 7 43 7 46 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 7 7 18 0 0 0 268 18 18 0 25 0 35 39 35 35 7 92 75 75 53 85 64 0 63 0 0 0 0 0 103])
+
+  ; symbol counts by an independent fold over a literal strip: one pass, one tally per code
+  (defun tally:[integer] (strip:[integer])
+    (fold (lambda (acc:[integer] s:integer)
+            (map (lambda (k:integer) (if (= k s) (+ 1 (at k acc)) (at k acc))) [0 1 2 3 4 5]))
+          [0 0 0 0 0 0] strip))
+
+  ; the symbol d stops from each stop, wrapping: d = 63 is the stop above, d = 1 below
+  (defun shifted:[integer] (strip:[integer] d:integer)
+    (map (lambda (i:integer) (at (mod (+ i d) 64) strip)) (enumerate 0 63)))
+  (defun neighbours:bool (strip:[integer])
+    (and (= (tally (shifted strip 63)) (tally strip))
+         (= (tally (shifted strip 1)) (tally strip))))
+
+  ; lines showing a triple, and the weighted return over a literal pay list
+  (defun weight:integer (counts:[integer] t:[integer])
+    (* (at (at 0 t) counts) (* (at (at 1 t) counts) (at (at 2 t) counts))))
+  (defun return-units:integer (counts:[integer] pays:[integer])
+    (fold (+) 0 (zip (lambda (t:[integer] p:integer) (* (weight counts t) p)) TRIPLES-LIT pays)))
+  ; the pays of the triples that can actually show (weight > 0)
+  (defun live-pays:[integer] (counts:[integer] pays:[integer])
+    (map (at 1)
+      (filter (lambda (x:[integer]) (> (at 0 x) 0))
+        (zip (lambda (t:[integer] p:integer) [(weight counts t) p]) TRIPLES-LIT pays))))
+  (defun imax:integer (xs:[integer])
+    (fold (lambda (m:integer x:integer) (if (> x m) x m)) 0 xs))
+  (defun imin-pos:integer (xs:[integer])
+    (fold (lambda (m:integer x:integer) (if (and (> x 0) (< x m)) x m)) 1000000 xs))
+
+  ; free spins: does the stop's three-stop window (above, on, below) hold the scatter?
+  (defun window-scatter:bool (strip:[integer] s:integer)
+    (contains 5 [(at (mod (+ s 63) 64) strip) (at s strip) (at (mod (+ s 1) 64) strip)]))
+  (defun scatter-stops:[integer] (strip:[integer])
+    (filter (window-scatter strip) (enumerate 0 63)))
+  ; the stops whose window holds a scatter but whose line symbol is neither blank nor scatter
+  (defun trigger-line-offenders:[integer] (strip:[integer])
+    (filter (lambda (s:integer) (not (contains (at s strip) [0 5]))) (scatter-stops strip)))
+  ; the list with position i replaced
+  (defun put:[integer] (xs:[integer] i:integer v:integer)
+    (+ (take i xs) (+ [v] (drop (+ i 1) xs))))
+)
+(commit-tx)
+;; ============================================================================
+;; M1 — THE MACHINES: STRIPS, COUNTS, PAYS, IDENTITY
+;; ============================================================================
+;; WHY: every reel stop reads a machine's strip and every win reads its pays. One wrong stop or
+;; pay moves the return, so each MACHINES entry is pinned whole against the literal, and the
+;; counts are recounted here from the literal strip.
+(begin-tx "M1: the machines")
+(expect "M1a MACHINE-COUNT is 6"
+  6
+  n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.MACHINE-COUNT)
+(expect "M1b SYMBOL-CODES is [0 1 2 3 4 5] (blank cherry bell bar seven special)"
+  [0 1 2 3 4 5]
+  n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.SYMBOL-CODES)
+(expect "M1c SYMBOL-NAMES in code order"
+  ["blank" "cherry" "bell" "bar" "seven" "special"]
+  n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.SYMBOL-NAMES)
+(expect "M1d MACHINES holds six entries with ids 0..5 in order"
+  [0 1 2 3 4 5]
+  (map (at 'id) n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.MACHINES))
+(expect "M1e the lines on three 64-stop reels: 262144"
+  262144
+  n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.COMBINATIONS)
+(expect "M1f the free-spins and tumble rule constants: FREE-SPINS 8, FREE-MULT 2, FREE-MAX 24, FREE-CAP 100, TUMBLE-MAX 5 (d_free.py args 8 2 24 100; f_cascade.py RMAX 5)"
+  [8 2 24 100 5]
+  [n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.FREE-SPINS n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.FREE-MULT n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.FREE-MAX n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.FREE-CAP n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.TUMBLE-MAX])
+(expect "M1g TUMBLE-LINES: three rows then both diagonals (f_cascade.LINES)"
+  [[0 0 0] [1 1 1] [2 2 2] [0 1 2] [2 1 0]]
+  n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.TUMBLE-LINES)
+(expect "M1h.0 machine 0 (classic) is exactly its literal entry: strip, pays, max-units, div, kind, name, pinned-return"
+  { "id": 0, "name": "classic", "kind": "line"
+  , "reel": smartpacts.srules.REEL-0, "pays": smartpacts.srules.PAYS-0
+  , "max-units": 40, "div": 1, "pinned-return": [] }
+  (at 0 n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.MACHINES))
+(expect "M1i.0 machine 0's literal strip has 64 stops"
+  64
+  (length smartpacts.srules.REEL-0))
+(expect "M1j.0 machine 0: an independent fold over the LITERAL strip counts [38 8 8 8 2 0] (codes 0..5)"
+  [38 8 8 8 2 0]
+  (smartpacts.srules.tally smartpacts.srules.REEL-0))
+(expect "M1k.0 machine 0: the strip's neighbours show true odds (one stop above and below tally like the line)"
+  true
+  (smartpacts.srules.neighbours smartpacts.srules.REEL-0))
+(expect "M1l.0 machine 0: the machines view publishes the same strip, pays, kind and div"
+  [smartpacts.srules.REEL-0 smartpacts.srules.PAYS-0 "line" 1]
+  (let ((v (at 0 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.machines)))) [(at 'reel v) (at 'pays v) (at 'kind v) (at 'div v)]))
+(expect "M1h.1 machine 1 (easy) is exactly its literal entry: strip, pays, max-units, div, kind, name, pinned-return"
+  { "id": 1, "name": "easy", "kind": "line"
+  , "reel": smartpacts.srules.REEL-1, "pays": smartpacts.srules.PAYS-1
+  , "max-units": 18, "div": 1, "pinned-return": [] }
+  (at 1 n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.MACHINES))
+(expect "M1i.1 machine 1's literal strip has 64 stops"
+  64
+  (length smartpacts.srules.REEL-1))
+(expect "M1j.1 machine 1: an independent fold over the LITERAL strip counts [36 12 10 4 2 0] (codes 0..5)"
+  [36 12 10 4 2 0]
+  (smartpacts.srules.tally smartpacts.srules.REEL-1))
+(expect "M1k.1 machine 1: the strip's neighbours show true odds (one stop above and below tally like the line)"
+  true
+  (smartpacts.srules.neighbours smartpacts.srules.REEL-1))
+(expect "M1l.1 machine 1: the machines view publishes the same strip, pays, kind and div"
+  [smartpacts.srules.REEL-1 smartpacts.srules.PAYS-1 "line" 1]
+  (let ((v (at 1 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.machines)))) [(at 'reel v) (at 'pays v) (at 'kind v) (at 'div v)]))
+(expect "M1h.2 machine 2 (big) is exactly its literal entry: strip, pays, max-units, div, kind, name, pinned-return"
+  { "id": 2, "name": "big", "kind": "line"
+  , "reel": smartpacts.srules.REEL-2, "pays": smartpacts.srules.PAYS-2
+  , "max-units": 250, "div": 1, "pinned-return": [] }
+  (at 2 n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.MACHINES))
+(expect "M1i.2 machine 2's literal strip has 64 stops"
+  64
+  (length smartpacts.srules.REEL-2))
+(expect "M1j.2 machine 2: an independent fold over the LITERAL strip counts [44 4 8 4 4 0] (codes 0..5)"
+  [44 4 8 4 4 0]
+  (smartpacts.srules.tally smartpacts.srules.REEL-2))
+(expect "M1k.2 machine 2: the strip's neighbours show true odds (one stop above and below tally like the line)"
+  true
+  (smartpacts.srules.neighbours smartpacts.srules.REEL-2))
+(expect "M1l.2 machine 2: the machines view publishes the same strip, pays, kind and div"
+  [smartpacts.srules.REEL-2 smartpacts.srules.PAYS-2 "line" 1]
+  (let ((v (at 2 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.machines)))) [(at 'reel v) (at 'pays v) (at 'kind v) (at 'div v)]))
+(expect "M1h.3 machine 3 (wild) is exactly its literal entry: strip, pays, max-units, div, kind, name, pinned-return"
+  { "id": 3, "name": "wild", "kind": "wild"
+  , "reel": smartpacts.srules.REEL-3, "pays": smartpacts.srules.PAYS-3
+  , "max-units": 40, "div": 1, "pinned-return": [] }
+  (at 3 n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.MACHINES))
+(expect "M1i.3 machine 3's literal strip has 64 stops"
+  64
+  (length smartpacts.srules.REEL-3))
+(expect "M1j.3 machine 3: an independent fold over the LITERAL strip counts [36 8 8 8 2 2] (codes 0..5)"
+  [36 8 8 8 2 2]
+  (smartpacts.srules.tally smartpacts.srules.REEL-3))
+(expect "M1k.3 machine 3: the strip's neighbours show true odds (one stop above and below tally like the line)"
+  true
+  (smartpacts.srules.neighbours smartpacts.srules.REEL-3))
+(expect "M1l.3 machine 3: the machines view publishes the same strip, pays, kind and div"
+  [smartpacts.srules.REEL-3 smartpacts.srules.PAYS-3 "wild" 1]
+  (let ((v (at 3 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.machines)))) [(at 'reel v) (at 'pays v) (at 'kind v) (at 'div v)]))
+;; the pinned-return below is the RTP fraction printed by `d_free.py 40,20,10,10,5,3,2 4 8 2 24 100`, copied by gen.py
+(expect "M1h.4 machine 4 (free-spins) is exactly its literal entry: strip, pays, max-units, div, kind, name, pinned-return"
+  { "id": 4, "name": "free-spins", "kind": "free"
+  , "reel": smartpacts.srules.REEL-4, "pays": smartpacts.srules.PAYS-4
+  , "max-units": 100, "div": 1, "pinned-return": [9063389690458042355601938653540158107548580822591401155618918013981973816811062613547804594484841949198261321 9394170331095332911557922387157348109502730195633279482829163886128836100458433773854795993539074812127739904] }
+  (at 4 n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.MACHINES))
+(expect "M1i.4 machine 4's literal strip has 64 stops"
+  64
+  (length smartpacts.srules.REEL-4))
+(expect "M1j.4 machine 4: an independent fold over the LITERAL strip counts [34 8 8 8 2 4] (codes 0..5)"
+  [34 8 8 8 2 4]
+  (smartpacts.srules.tally smartpacts.srules.REEL-4))
+(expect "M1k.4 machine 4: the strip's neighbours show true odds (one stop above and below tally like the line)"
+  true
+  (smartpacts.srules.neighbours smartpacts.srules.REEL-4))
+(expect "M1l.4 machine 4: the machines view publishes the same strip, pays, kind and div"
+  [smartpacts.srules.REEL-4 smartpacts.srules.PAYS-4 "free" 1]
+  (let ((v (at 4 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.machines)))) [(at 'reel v) (at 'pays v) (at 'kind v) (at 'div v)]))
+(expect "M1h.5 machine 5 (tumble) is exactly its literal entry: strip, pays, max-units, div, kind, name, pinned-return"
+  { "id": 5, "name": "tumble", "kind": "tumble"
+  , "reel": smartpacts.srules.REEL-5, "pays": smartpacts.srules.PAYS-5
+  , "max-units": 563, "div": 5, "pinned-return": [19651 20480] }
+  (at 5 n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.MACHINES))
+(expect "M1i.5 machine 5's literal strip has 64 stops"
+  64
+  (length smartpacts.srules.REEL-5))
+(expect "M1j.5 machine 5: an independent fold over the LITERAL strip counts [16 22 14 8 4 0] (codes 0..5)"
+  [16 22 14 8 4 0]
+  (smartpacts.srules.tally smartpacts.srules.REEL-5))
+(expect "M1k.5 machine 5: the strip's neighbours show true odds (one stop above and below tally like the line)"
+  true
+  (smartpacts.srules.neighbours smartpacts.srules.REEL-5))
+(expect "M1l.5 machine 5: the machines view publishes the same strip, pays, kind and div"
+  [smartpacts.srules.REEL-5 smartpacts.srules.PAYS-5 "tumble" 5]
+  (let ((v (at 5 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.machines)))) [(at 'reel v) (at 'pays v) (at 'kind v) (at 'div v)]))
+(expect "M1m code 5 appears only where it should: none on classic/easy/big/tumble, 2 wilds, 4 scatters"
+  [0 0 0 2 4 0]
+  (map (lambda (r:[integer]) (at 5 (smartpacts.srules.tally r))) [smartpacts.srules.REEL-0 smartpacts.srules.REEL-1 smartpacts.srules.REEL-2 smartpacts.srules.REEL-3 smartpacts.srules.REEL-4 smartpacts.srules.REEL-5]))
+;; CONTROL: the tally is not blind -- classic's stop 0 (a seven) turned into a code 5 moves two counts
+(expect "M1n CONTROL the tally sees a single changed stop on the classic strip"
+  [38 8 8 8 1 1]
+  (smartpacts.srules.tally (smartpacts.srules.put smartpacts.srules.REEL-0 0 5)))
+;; On one uniform strip the neighbour property holds by construction (the shifted strip is a rotation);
+;; what M1k pins is that a stop IS a strip position. CONTROL: the shift really moved each strip.
+(expect "M1o CONTROL for every machine the strip one stop above and one stop below differ from the line itself"
+  [false false false false false false]
+  (map (lambda (r:[integer]) (or (= r (smartpacts.srules.shifted r 63)) (= r (smartpacts.srules.shifted r 1)))) [smartpacts.srules.REEL-0 smartpacts.srules.REEL-1 smartpacts.srules.REEL-2 smartpacts.srules.REEL-3 smartpacts.srules.REEL-4 smartpacts.srules.REEL-5]))
+(expect "M1p wrap: above classic's stop 0 is stop 63 (blank), below stop 63 is stop 0 (seven)"
+  [0 4]
+  [(at 0 (smartpacts.srules.shifted smartpacts.srules.REEL-0 63)) (at 63 (smartpacts.srules.shifted smartpacts.srules.REEL-0 1))])
+(commit-tx)
+
+;; ============================================================================
+;; M2 — THE EXACT RETURN OF EVERY MACHINE
+;; ============================================================================
+;; WHY: the module computes the line and wild returns at load and pins the other two. Each is
+;; pinned as a literal, the line/wild ones are recomputed here from the literal counts and pay
+;; lists, and each is stated as the reduced fraction players are told.
+(begin-tx "M2: the returns")
+(expect "M2a RETURNS is the literal [num den] of all six machines (the free-spins pair is d_free.py's printed fraction)"
+  [[251648 262144] [251648 262144] [251648 262144] [251680 262144] [9063389690458042355601938653540158107548580822591401155618918013981973816811062613547804594484841949198261321 9394170331095332911557922387157348109502730195633279482829163886128836100458433773854795993539074812127739904] [19651 20480]]
+  n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.RETURNS)
+(expect "M2b TRIPLES is the 216 ordered triples [0 0 0] .. [5 5 5], a outermost"
+  smartpacts.srules.TRIPLES-LIT
+  n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.TRIPLES)
+(expect "M2c.0 machine 0: the weighted sum over the LITERAL counts and the LITERAL 216-entry pay list is 251648"
+  251648
+  (smartpacts.srules.return-units (smartpacts.srules.tally smartpacts.srules.REEL-0) smartpacts.srules.LIST-0))
+(expect "M2d.0 machine 0: triple-units over all 216 triples equals the oracle's pay list"
+  smartpacts.srules.LIST-0
+  (map (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.triple-units (at 0 n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.MACHINES)) smartpacts.srules.TRIPLES-LIT))
+(expect "M2e.0 machine 0: 251648/262144 is exactly 983/1024 (cross-multiplication)"
+  true
+  (= (* 1024 251648) (* 983 262144)))
+(expect "M2c.1 machine 1: the weighted sum over the LITERAL counts and the LITERAL 216-entry pay list is 251648"
+  251648
+  (smartpacts.srules.return-units (smartpacts.srules.tally smartpacts.srules.REEL-1) smartpacts.srules.LIST-1))
+(expect "M2d.1 machine 1: triple-units over all 216 triples equals the oracle's pay list"
+  smartpacts.srules.LIST-1
+  (map (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.triple-units (at 1 n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.MACHINES)) smartpacts.srules.TRIPLES-LIT))
+(expect "M2e.1 machine 1: 251648/262144 is exactly 983/1024 (cross-multiplication)"
+  true
+  (= (* 1024 251648) (* 983 262144)))
+(expect "M2c.2 machine 2: the weighted sum over the LITERAL counts and the LITERAL 216-entry pay list is 251648"
+  251648
+  (smartpacts.srules.return-units (smartpacts.srules.tally smartpacts.srules.REEL-2) smartpacts.srules.LIST-2))
+(expect "M2d.2 machine 2: triple-units over all 216 triples equals the oracle's pay list"
+  smartpacts.srules.LIST-2
+  (map (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.triple-units (at 2 n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.MACHINES)) smartpacts.srules.TRIPLES-LIT))
+(expect "M2e.2 machine 2: 251648/262144 is exactly 983/1024 (cross-multiplication)"
+  true
+  (= (* 1024 251648) (* 983 262144)))
+(expect "M2c.3 machine 3: the weighted sum over the LITERAL counts and the LITERAL 216-entry pay list is 251680"
+  251680
+  (smartpacts.srules.return-units (smartpacts.srules.tally smartpacts.srules.REEL-3) smartpacts.srules.LIST-3))
+(expect "M2d.3 machine 3: triple-units over all 216 triples equals the oracle's pay list"
+  smartpacts.srules.LIST-3
+  (map (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.triple-units (at 3 n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.MACHINES)) smartpacts.srules.TRIPLES-LIT))
+(expect "M2e.3 machine 3: 251680/262144 is exactly 7865/8192 (cross-multiplication)"
+  true
+  (= (* 8192 251680) (* 7865 262144)))
+(expect "M2f free-spins: the pinned fraction is 109 digits over 109 digits, already in lowest terms (Python Fraction leaves it unchanged)"
+  [109 109]
+  [(length (int-to-str 10 (at 0 (at 4 n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.RETURNS)))) (length (int-to-str 10 (at 1 (at 4 n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.RETURNS))))])
+(expect "M2g tumble: the line units over all 262,144 stop triples total 1257664 (rules_oracle.py enumeration), at a line bet of 1/5: 1257664/1310720 is exactly 19651/20480 (f_cascade.py printed RTP=19651/20480)"
+  true
+  (= (* 20480 1257664) (* 19651 1310720)))
+;; CONTROL: the return recomputation is not blind -- three sevens paying one more on classic moves it by 2x2x2 = 8
+(expect "M2h CONTROL classic with three sevens at 41 returns 251656, not 251648"
+  251656
+  (smartpacts.srules.return-units (smartpacts.srules.tally smartpacts.srules.REEL-0) (smartpacts.srules.put smartpacts.srules.LIST-0 172 41)))
+(expect "M2i EDGES, floored at 30 places (rules_oracle.py dec30: floor((den-num)*10^30/den))"
+  [0.0400390625 0.0400390625 0.0400390625 0.0399169921875 0.035211267092143782350633855823 0.040478515625]
+  n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.EDGES)
+(expect "M2j the classic edge 0.0400390625 is 41/1024 and 983 + 41 = 1024"
+  [0.0400390625 1024]
+  [(/ 41.0 1024.0) (+ 983 41)])
+(expect "M2k MAX-MULTS = max-units / div"
+  [40.0 18.0 250.0 40.0 100.0 112.6]
+  n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.MAX-MULTS)
+(expect "M2l.0 machine 0: the smallest win that can show is 2x the stake (>= 2)"
+  2
+  (smartpacts.srules.imin-pos (smartpacts.srules.live-pays (smartpacts.srules.tally smartpacts.srules.REEL-0) smartpacts.srules.LIST-0)))
+(expect "M2l.1 machine 1: the smallest win that can show is 2x the stake (>= 2)"
+  2
+  (smartpacts.srules.imin-pos (smartpacts.srules.live-pays (smartpacts.srules.tally smartpacts.srules.REEL-1) smartpacts.srules.LIST-1)))
+(expect "M2l.2 machine 2: the smallest win that can show is 4x the stake (>= 2)"
+  4
+  (smartpacts.srules.imin-pos (smartpacts.srules.live-pays (smartpacts.srules.tally smartpacts.srules.REEL-2) smartpacts.srules.LIST-2)))
+(expect "M2l.3 machine 3: the smallest win that can show is 2x the stake (>= 2)"
+  2
+  (smartpacts.srules.imin-pos (smartpacts.srules.live-pays (smartpacts.srules.tally smartpacts.srules.REEL-3) smartpacts.srules.LIST-3)))
+(expect "M2m no line or wild machine has a showing win below 2x the stake"
+  []
+  (filter (lambda (x:integer) (< x 2)) (map (lambda (i:integer) (smartpacts.srules.imin-pos (smartpacts.srules.live-pays (smartpacts.srules.tally (at i [smartpacts.srules.REEL-0 smartpacts.srules.REEL-1 smartpacts.srules.REEL-2 smartpacts.srules.REEL-3])) (at i [smartpacts.srules.LIST-0 smartpacts.srules.LIST-1 smartpacts.srules.LIST-2 smartpacts.srules.LIST-3])))) [0 1 2 3])))
+(expect "M2n free-spins: its smallest line pay is 2 (d_free.py printed 'min nonzero spin return: 2'); a bonus is FREE-MULT 2 x a line, so at least 4"
+  [2 4]
+  (let ((m (smartpacts.srules.imin-pos (take 7 smartpacts.srules.PAYS-4)))) [m (* 2 m)]))
+(expect "M2o tumble: its smallest win is 7 line units = 1.4x the spin's stake (7/5; rules_oracle.py enumeration 'min win 7'): no win returns less than the stake"
+  [7 1.4 true]
+  (let ((m (smartpacts.srules.imin-pos smartpacts.srules.PAYS-5))) [m (/ (dec m) 5.0) (>= (dec m) 5.0)]))
+(commit-tx)
+
+;; ============================================================================
+;; M3 — THE EVALUATORS AGAINST THE ORACLE
+;; ============================================================================
+;; WHY: a player checks a result by recomputing it. spin-units is compared on 56 keys per
+;; machine, including every rare path the parity harness hunted: two and three wilds
+;; (hunt|102..5833, hunt|2587 = three wilds and a five-cascade tumble), free-spins triggers
+;; (hunt|96, 374, 509 and the six of the "retrig" group), a trigger with one retrigger
+;; (hunt|15931: 16 free spins), two retriggers to FREE-MAX (hunt|122090: 24 free spins), the
+;; bonus reaching FREE-CAP 100 (hunt|440466: stops after 12 free spins), and tumbles of 3 or
+;; more cascades (hunt|147..577).
+(begin-tx "M3: evaluator parity")
+(expect "M3a.0 machine 0 (classic): spin-units on all 56 keys equals the oracle's list"
+  smartpacts.srules.UNITS-0
+  (map (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.spin-units 0) smartpacts.srules.KEYS))
+(expect "M3a.1 machine 1 (easy): spin-units on all 56 keys equals the oracle's list"
+  smartpacts.srules.UNITS-1
+  (map (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.spin-units 1) smartpacts.srules.KEYS))
+(expect "M3a.2 machine 2 (big): spin-units on all 56 keys equals the oracle's list"
+  smartpacts.srules.UNITS-2
+  (map (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.spin-units 2) smartpacts.srules.KEYS))
+(expect "M3a.3 machine 3 (wild): spin-units on all 56 keys equals the oracle's list"
+  smartpacts.srules.UNITS-3
+  (map (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.spin-units 3) smartpacts.srules.KEYS))
+(expect "M3a.4 machine 4 (free-spins): spin-units on all 56 keys equals the oracle's list"
+  smartpacts.srules.UNITS-4
+  (map (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.spin-units 4) smartpacts.srules.KEYS))
+(expect "M3a.5 machine 5 (tumble): spin-units on all 56 keys equals the oracle's list"
+  smartpacts.srules.UNITS-5
+  (map (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.spin-units 5) smartpacts.srules.KEYS))
+(expect "M3b the keys are 56 and every hunted key of diff/py.json is among them"
+  [56 24]
+  [(length smartpacts.srules.KEYS) (length (filter (lambda (k:string) (= "hunt" (take 4 k))) (take 54 smartpacts.srules.KEYS)))])
+;; CONTROL: the comparison is not blind -- the classic list with one entry changed does not match
+(expect "M3c CONTROL a UNITS list with one entry changed does not match"
+  false
+  (= (smartpacts.srules.put smartpacts.srules.UNITS-0 0 1) (map (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.spin-units 0) smartpacts.srules.KEYS)))
+(expect "M3d free-bonus on one retrigger, two retriggers (FREE-MAX) and the FREE-CAP stop: the oracle's bonus (the trigger line pays 0, so bonus = units)"
+  [38 84 100]
+  (map (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.free-bonus smartpacts.srules.REEL-4 smartpacts.srules.PAYS-4) ["hunt|15931" "hunt|122090" "hunt|440466"]))
+;; machine 0 (classic): one line per paytable category, values = common.pay3(40, 20, 10, 15, 5, 5, 2)
+(expect "M3e.0 classic: three sevens [4 4 4] pays 40"
+  40
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-0 4 4 4))
+(expect "M3e.0 classic: three bars [3 3 3] pays 20"
+  20
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-0 3 3 3))
+(expect "M3e.0 classic: three bells [2 2 2] pays 10"
+  10
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-0 2 2 2))
+(expect "M3e.0 classic: three cherries [1 1 1] pays 15"
+  15
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-0 1 1 1))
+(expect "M3e.0 classic: any three high: bell bar seven [2 3 4] pays 5"
+  5
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-0 2 3 4))
+(expect "M3e.0 classic: any three high: seven seven bar (two sevens are not three) [4 4 3] pays 5"
+  5
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-0 4 4 3))
+(expect "M3e.0 classic: any three high: bar bar bell [3 3 2] pays 5"
+  5
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-0 3 3 2))
+(expect "M3e.0 classic: two cherries xx_ [1 1 0] pays 5"
+  5
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-0 1 1 0))
+(expect "M3e.0 classic: two cherries x_x [1 0 1] pays 5"
+  5
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-0 1 0 1))
+(expect "M3e.0 classic: two cherries _xx [0 1 1] pays 5"
+  5
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-0 0 1 1))
+(expect "M3e.0 classic: two cherries beside a seven [1 4 1] pays 5"
+  5
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-0 1 4 1))
+(expect "M3e.0 classic: one cherry among blanks [1 0 0] pays 2"
+  2
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-0 1 0 0))
+(expect "M3e.0 classic: one cherry in the middle [0 1 0] pays 2"
+  2
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-0 0 1 0))
+(expect "M3e.0 classic: one cherry last [0 0 1] pays 2"
+  2
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-0 0 0 1))
+(expect "M3e.0 classic: one cherry among highs [1 2 3] pays 2"
+  2
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-0 1 2 3))
+(expect "M3e.0 classic: two sevens + blank pays 0 [4 4 0] pays 0"
+  0
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-0 4 4 0))
+(expect "M3e.0 classic: blank + two sevens pays 0 [0 4 4] pays 0"
+  0
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-0 0 4 4))
+(expect "M3e.0 classic: bell bar blank pays 0 [2 3 0] pays 0"
+  0
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-0 2 3 0))
+(expect "M3e.0 classic: three blanks pay 0 [0 0 0] pays 0"
+  0
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-0 0 0 0))
+;; machine 1 (easy): one line per paytable category, values = common.pay3(18, 6, 2, 2, 2, 2, 2)
+(expect "M3e.1 easy: three sevens [4 4 4] pays 18"
+  18
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-1 4 4 4))
+(expect "M3e.1 easy: three bars [3 3 3] pays 6"
+  6
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-1 3 3 3))
+(expect "M3e.1 easy: three bells [2 2 2] pays 2"
+  2
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-1 2 2 2))
+(expect "M3e.1 easy: three cherries [1 1 1] pays 2"
+  2
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-1 1 1 1))
+(expect "M3e.1 easy: any three high: bell bar seven [2 3 4] pays 2"
+  2
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-1 2 3 4))
+(expect "M3e.1 easy: any three high: seven seven bar (two sevens are not three) [4 4 3] pays 2"
+  2
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-1 4 4 3))
+(expect "M3e.1 easy: any three high: bar bar bell [3 3 2] pays 2"
+  2
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-1 3 3 2))
+(expect "M3e.1 easy: two cherries xx_ [1 1 0] pays 2"
+  2
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-1 1 1 0))
+(expect "M3e.1 easy: two cherries x_x [1 0 1] pays 2"
+  2
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-1 1 0 1))
+(expect "M3e.1 easy: two cherries _xx [0 1 1] pays 2"
+  2
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-1 0 1 1))
+(expect "M3e.1 easy: two cherries beside a seven [1 4 1] pays 2"
+  2
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-1 1 4 1))
+(expect "M3e.1 easy: one cherry among blanks [1 0 0] pays 2"
+  2
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-1 1 0 0))
+(expect "M3e.1 easy: one cherry in the middle [0 1 0] pays 2"
+  2
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-1 0 1 0))
+(expect "M3e.1 easy: one cherry last [0 0 1] pays 2"
+  2
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-1 0 0 1))
+(expect "M3e.1 easy: one cherry among highs [1 2 3] pays 2"
+  2
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-1 1 2 3))
+(expect "M3e.1 easy: two sevens + blank pays 0 [4 4 0] pays 0"
+  0
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-1 4 4 0))
+(expect "M3e.1 easy: blank + two sevens pays 0 [0 4 4] pays 0"
+  0
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-1 0 4 4))
+(expect "M3e.1 easy: bell bar blank pays 0 [2 3 0] pays 0"
+  0
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-1 2 3 0))
+(expect "M3e.1 easy: three blanks pay 0 [0 0 0] pays 0"
+  0
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-1 0 0 0))
+;; machine 2 (big): one line per paytable category, values = common.pay3(250, 100, 30, 30, 8, 4, 4)
+(expect "M3e.2 big: three sevens [4 4 4] pays 250"
+  250
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-2 4 4 4))
+(expect "M3e.2 big: three bars [3 3 3] pays 100"
+  100
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-2 3 3 3))
+(expect "M3e.2 big: three bells [2 2 2] pays 30"
+  30
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-2 2 2 2))
+(expect "M3e.2 big: three cherries [1 1 1] pays 30"
+  30
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-2 1 1 1))
+(expect "M3e.2 big: any three high: bell bar seven [2 3 4] pays 8"
+  8
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-2 2 3 4))
+(expect "M3e.2 big: any three high: seven seven bar (two sevens are not three) [4 4 3] pays 8"
+  8
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-2 4 4 3))
+(expect "M3e.2 big: any three high: bar bar bell [3 3 2] pays 8"
+  8
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-2 3 3 2))
+(expect "M3e.2 big: two cherries xx_ [1 1 0] pays 4"
+  4
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-2 1 1 0))
+(expect "M3e.2 big: two cherries x_x [1 0 1] pays 4"
+  4
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-2 1 0 1))
+(expect "M3e.2 big: two cherries _xx [0 1 1] pays 4"
+  4
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-2 0 1 1))
+(expect "M3e.2 big: two cherries beside a seven [1 4 1] pays 4"
+  4
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-2 1 4 1))
+(expect "M3e.2 big: one cherry among blanks [1 0 0] pays 4"
+  4
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-2 1 0 0))
+(expect "M3e.2 big: one cherry in the middle [0 1 0] pays 4"
+  4
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-2 0 1 0))
+(expect "M3e.2 big: one cherry last [0 0 1] pays 4"
+  4
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-2 0 0 1))
+(expect "M3e.2 big: one cherry among highs [1 2 3] pays 4"
+  4
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-2 1 2 3))
+(expect "M3e.2 big: two sevens + blank pays 0 [4 4 0] pays 0"
+  0
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-2 4 4 0))
+(expect "M3e.2 big: blank + two sevens pays 0 [0 4 4] pays 0"
+  0
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-2 0 4 4))
+(expect "M3e.2 big: bell bar blank pays 0 [2 3 0] pays 0"
+  0
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-2 2 3 0))
+(expect "M3e.2 big: three blanks pay 0 [0 0 0] pays 0"
+  0
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-2 0 0 0))
+;; machine 3 (wild): one line per category, values = e_wild.mkpay((20, 8, 6, 15, 5, 2, 2, 40), 'double')
+(expect "M3f wild: three sevens [4 4 4] pays 20"
+  20
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wild-pay smartpacts.srules.PAYS-3 4 4 4))
+(expect "M3f wild: three bars [3 3 3] pays 8"
+  8
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wild-pay smartpacts.srules.PAYS-3 3 3 3))
+(expect "M3f wild: three bells [2 2 2] pays 6"
+  6
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wild-pay smartpacts.srules.PAYS-3 2 2 2))
+(expect "M3f wild: three cherries [1 1 1] pays 15"
+  15
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wild-pay smartpacts.srules.PAYS-3 1 1 1))
+(expect "M3f wild: any three high: bell bar seven [2 3 4] pays 5"
+  5
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wild-pay smartpacts.srules.PAYS-3 2 3 4))
+(expect "M3f wild: any three high: seven seven bar (two sevens are not three) [4 4 3] pays 5"
+  5
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wild-pay smartpacts.srules.PAYS-3 4 4 3))
+(expect "M3f wild: any three high: bar bar bell [3 3 2] pays 5"
+  5
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wild-pay smartpacts.srules.PAYS-3 3 3 2))
+(expect "M3f wild: two cherries xx_ [1 1 0] pays 2"
+  2
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wild-pay smartpacts.srules.PAYS-3 1 1 0))
+(expect "M3f wild: two cherries x_x [1 0 1] pays 2"
+  2
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wild-pay smartpacts.srules.PAYS-3 1 0 1))
+(expect "M3f wild: two cherries _xx [0 1 1] pays 2"
+  2
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wild-pay smartpacts.srules.PAYS-3 0 1 1))
+(expect "M3f wild: two cherries beside a seven [1 4 1] pays 2"
+  2
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wild-pay smartpacts.srules.PAYS-3 1 4 1))
+(expect "M3f wild: one cherry among blanks [1 0 0] pays 2"
+  2
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wild-pay smartpacts.srules.PAYS-3 1 0 0))
+(expect "M3f wild: one cherry in the middle [0 1 0] pays 2"
+  2
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wild-pay smartpacts.srules.PAYS-3 0 1 0))
+(expect "M3f wild: one cherry last [0 0 1] pays 2"
+  2
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wild-pay smartpacts.srules.PAYS-3 0 0 1))
+(expect "M3f wild: one cherry among highs [1 2 3] pays 2"
+  2
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wild-pay smartpacts.srules.PAYS-3 1 2 3))
+(expect "M3f wild: two sevens + blank pays 0 [4 4 0] pays 0"
+  0
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wild-pay smartpacts.srules.PAYS-3 4 4 0))
+(expect "M3f wild: blank + two sevens pays 0 [0 4 4] pays 0"
+  0
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wild-pay smartpacts.srules.PAYS-3 0 4 4))
+(expect "M3f wild: bell bar blank pays 0 [2 3 0] pays 0"
+  0
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wild-pay smartpacts.srules.PAYS-3 2 3 0))
+(expect "M3f wild: three blanks pay 0 [0 0 0] pays 0"
+  0
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wild-pay smartpacts.srules.PAYS-3 0 0 0))
+(expect "M3f wild: wild + wild + seven = 2 x top [5 5 4] pays 40"
+  40
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wild-pay smartpacts.srules.PAYS-3 5 5 4))
+(expect "M3f wild: seven + wild + wild [4 5 5] pays 40"
+  40
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wild-pay smartpacts.srules.PAYS-3 4 5 5))
+(expect "M3f wild: three wilds pay the wild slot [5 5 5] pays 40"
+  40
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wild-pay smartpacts.srules.PAYS-3 5 5 5))
+(expect "M3f wild: wild + two sevens = 2 x top [5 4 4] pays 40"
+  40
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wild-pay smartpacts.srules.PAYS-3 5 4 4))
+(expect "M3f wild: wild + two bars = 2 x bars [5 3 3] pays 16"
+  16
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wild-pay smartpacts.srules.PAYS-3 5 3 3))
+(expect "M3f wild: wild + two bells = 2 x bells [3 5 3] pays 16"
+  16
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wild-pay smartpacts.srules.PAYS-3 3 5 3))
+(expect "M3f wild: wild + bell + bar = 2 x any-high [5 2 3] pays 10"
+  10
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wild-pay smartpacts.srules.PAYS-3 5 2 3))
+(expect "M3f wild: wild + two cherries: three cherries substituted and doubled [5 1 1] pays 30"
+  30
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wild-pay smartpacts.srules.PAYS-3 5 1 1))
+(expect "M3f wild: cherry + wild + cherry [1 5 1] pays 30"
+  30
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wild-pay smartpacts.srules.PAYS-3 1 5 1))
+(expect "M3f wild: wild + wild + cherry [5 5 1] pays 30"
+  30
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wild-pay smartpacts.srules.PAYS-3 5 5 1))
+(expect "M3f wild: wild + cherry + blank: the cherry pay is not doubled [5 1 0] pays 2"
+  2
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wild-pay smartpacts.srules.PAYS-3 5 1 0))
+(expect "M3f wild: wild + blank + blank pays 0 [5 0 0] pays 0"
+  0
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wild-pay smartpacts.srules.PAYS-3 5 0 0))
+(expect "M3f wild: wild + wild + blank pays 0 [5 5 0] pays 0"
+  0
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wild-pay smartpacts.srules.PAYS-3 5 5 0))
+(expect "M3f wild: wild + cherry + seven: cherry breaks the high line [5 1 4] pays 2"
+  2
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.wild-pay smartpacts.srules.PAYS-3 5 1 4))
+;; free-look: stops from d_free.machine's strip, where the scatters sit at 7, 23, 39, 55; values = rules_oracle.free_look
+(expect "M3g free-look [7 8 6]: line scatter blank blank -> win 0, trigger true"
+  { "win": 0, "trigger": true }
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.free-look smartpacts.srules.REEL-4 smartpacts.srules.PAYS-4 [7 8 6]))
+(expect "M3g free-look [7 23 22]: line scatter scatter blank -> win 0, trigger true"
+  { "win": 0, "trigger": true }
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.free-look smartpacts.srules.REEL-4 smartpacts.srules.PAYS-4 [7 23 22]))
+(expect "M3g free-look [0 32 0]: line seven seven seven -> win 40, trigger false"
+  { "win": 40, "trigger": false }
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.free-look smartpacts.srules.REEL-4 smartpacts.srules.PAYS-4 [0 32 0]))
+(expect "M3g free-look [7 7 9]: line scatter scatter bar -> win 0, trigger false"
+  { "win": 0, "trigger": false }
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.free-look smartpacts.srules.REEL-4 smartpacts.srules.PAYS-4 [7 7 9]))
+(expect "M3g free-look [6 8 24]: line blank blank blank -> win 0, trigger true"
+  { "win": 0, "trigger": true }
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.free-look smartpacts.srules.REEL-4 smartpacts.srules.PAYS-4 [6 8 24]))
+(expect "M3g free-look [63 7 7]: line blank scatter scatter -> win 0, trigger false"
+  { "win": 0, "trigger": false }
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.free-look smartpacts.srules.REEL-4 smartpacts.srules.PAYS-4 [63 7 7]))
+(expect "M3g free-look [5 7 7]: line cherry scatter scatter -> win 2, trigger false"
+  { "win": 2, "trigger": false }
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.free-look smartpacts.srules.REEL-4 smartpacts.srules.PAYS-4 [5 7 7]))
+(expect "M3g free-look [55 54 56]: line scatter blank blank -> win 0, trigger true"
+  { "win": 0, "trigger": true }
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.free-look smartpacts.srules.REEL-4 smartpacts.srules.PAYS-4 [55 54 56]))
+;; tumble-units: three hand-picked stop triples, cascades traced by rules_oracle.py (f_cascade.simulate);
+;; columns read bottom..top, codes 0 blank 1 cherry 2 bell 3 bar 4 seven; lines = rows 0,1,2 and diagonals;
+;; line pays cherry 7, bell 18, bar 35, seven 80; cascade k pays x k.
+;;   [0 0 3]: cols [4 3 2] [4 3 2] [1 1 2] -> c1 top row bells 18 x1; refill [4 3 1] [4 3 1] [1 1 0]: no line. = 18
+;;   [0 0 8]: cols [4 3 2] [4 3 2] [3 0 2] -> c1 top bells 18; then [4 3 1] [4 3 1] [3 0 1] top cherries 7 x2;
+;;            then [4 3 1] [4 3 1] [3 0 1] top cherries 7 x3; then [4 3 2] [4 3 2] [3 0 0]: stop. = 18+14+21 = 53
+;;   [8 8 8]: cols [3 0 2] x3 -> c1 bottom bars 35 + top bells 18 = 53; [0 1 1] x3 -> c2 middle and top
+;;            cherries 14 x2 = 28; [0 0 2] x3 -> c3 bells 18 x3 = 54; [0 0 1] x3 -> c4 cherries 7 x4 = 28;
+;;            [0 0 4] x3 -> c5 sevens 80 x5 = 400; five cascades is TUMBLE-MAX. = 563, the machine's maximum
+(expect "M3h tumble-units [0 0 3] is 18"
+  18
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.tumble-units smartpacts.srules.REEL-5 smartpacts.srules.PAYS-5 [0 0 3]))
+(expect "M3h tumble-units [0 0 8] is 53"
+  53
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.tumble-units smartpacts.srules.REEL-5 smartpacts.srules.PAYS-5 [0 0 8]))
+(expect "M3h tumble-units [8 8 8] is 563"
+  563
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.tumble-units smartpacts.srules.REEL-5 smartpacts.srules.PAYS-5 [8 8 8]))
+;; the beacon-to-reels recipe, per machine: board-seed = hash("{seed}|{account}"), spin i's key =
+;; "{bseed}|{i}", stops = three low 6-bit slices of str-to-int 64 (hash key). Seed = round 1 of the
+;; fixture (beacon 20801767). Values: boards.py (reproduce.pact_hash / str_to_int64 + rules_oracle
+;; evaluators); payout = floor(stake x units / div, 12).
+;; machine 0 (classic): k:a11ce00000000000000000000000000000000000000000000000000000000001, 20 spins at 0.1; per-spin units [0 0 0 2 0 0 0 0 5 0 0 0 0 0 0 0 0 0 2 0]
+(expect "M3i.0 board-seed of the round-1 seed and k:a11ce00000.. is the Python digest"
+  "ay_qyiNUEecoi5yhL3C-Lj8P0Kku4STxLY1U3T9FaLA"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.board-seed 41473200179623307258957694415769443739304335489542769187234381733079227613887 "k:a11ce00000000000000000000000000000000000000000000000000000000001"))
+(expect "M3j.0 spin-key of it for spin 1"
+  "ay_qyiNUEecoi5yhL3C-Lj8P0Kku4STxLY1U3T9FaLA|1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.spin-key "ay_qyiNUEecoi5yhL3C-Lj8P0Kku4STxLY1U3T9FaLA" 1))
+(expect "M3k.0 key-stops of spin 1 is [47 20 0]"
+  [47 20 0]
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.key-stops "ay_qyiNUEecoi5yhL3C-Lj8P0Kku4STxLY1U3T9FaLA|1"))
+(expect "M3l.0 play-board on machine 0: 9 units, payout 0.9"
+  { "stops": [ 47 20 0 25 12 60 4 33 52 1 7 13 6 6 46 14 54 3 26 51 39 40 27 52 1 33 51 7 18 48
+              18 58 6 47 30 41 7 55 59 8 55 1 38 15 52 62 43 16 32 31 51 16 40 43 23 5 10 28 57 23 ]
+  , "units": 9, "payout": 0.9 }
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-board 41473200179623307258957694415769443739304335489542769187234381733079227613887
+    "k:a11ce00000000000000000000000000000000000000000000000000000000001" 0 20 0.1))
+;; machine 1 (easy): k:a11ce00000000000000000000000000000000000000000000000000000000001, 5 spins at 0.2; per-spin units [0 2 0 2 0]
+(expect "M3i.1 board-seed of the round-1 seed and k:a11ce00000.. is the Python digest"
+  "ay_qyiNUEecoi5yhL3C-Lj8P0Kku4STxLY1U3T9FaLA"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.board-seed 41473200179623307258957694415769443739304335489542769187234381733079227613887 "k:a11ce00000000000000000000000000000000000000000000000000000000001"))
+(expect "M3j.1 spin-key of it for spin 1"
+  "ay_qyiNUEecoi5yhL3C-Lj8P0Kku4STxLY1U3T9FaLA|1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.spin-key "ay_qyiNUEecoi5yhL3C-Lj8P0Kku4STxLY1U3T9FaLA" 1))
+(expect "M3k.1 key-stops of spin 1 is [47 20 0]"
+  [47 20 0]
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.key-stops "ay_qyiNUEecoi5yhL3C-Lj8P0Kku4STxLY1U3T9FaLA|1"))
+(expect "M3l.1 play-board on machine 1: 4 units, payout 0.8"
+  { "stops": [ 47 20 0 25 12 60 4 33 52 1 7 13 6 6 46 ]
+  , "units": 4, "payout": 0.8 }
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-board 41473200179623307258957694415769443739304335489542769187234381733079227613887
+    "k:a11ce00000000000000000000000000000000000000000000000000000000001" 1 5 0.2))
+;; machine 2 (big): k:b0b0000000000000000000000000000000000000000000000000000000000002, 10 spins at 0.5; per-spin units [0 0 0 4 0 0 0 0 0 0]
+(expect "M3i.2 board-seed of the round-1 seed and k:b0b0000000.. is the Python digest"
+  "yFy72ALVnNvV-nEXAkFi-kNvPKBsHGQRuw3HBmyIUyY"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.board-seed 41473200179623307258957694415769443739304335489542769187234381733079227613887 "k:b0b0000000000000000000000000000000000000000000000000000000000002"))
+(expect "M3j.2 spin-key of it for spin 1"
+  "yFy72ALVnNvV-nEXAkFi-kNvPKBsHGQRuw3HBmyIUyY|1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.spin-key "yFy72ALVnNvV-nEXAkFi-kNvPKBsHGQRuw3HBmyIUyY" 1))
+(expect "M3k.2 key-stops of spin 1 is [43 5 45]"
+  [43 5 45]
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.key-stops "yFy72ALVnNvV-nEXAkFi-kNvPKBsHGQRuw3HBmyIUyY|1"))
+(expect "M3l.2 play-board on machine 2: 4 units, payout 2.0"
+  { "stops": [ 43 5 45 48 59 14 16 48 61 50 52 43 3 16 54 51 47 53 10 23 52 17 62 32 40 23 23 14 37 14 ]
+  , "units": 4, "payout": 2.0 }
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-board 41473200179623307258957694415769443739304335489542769187234381733079227613887
+    "k:b0b0000000000000000000000000000000000000000000000000000000000002" 2 10 0.5))
+;; machine 3 (wild): k:ca40100000000000000000000000000000000000000000000000000000000003, 10 spins at 1.0; per-spin units [0 2 0 0 0 2 0 0 0 2]
+(expect "M3i.3 board-seed of the round-1 seed and k:ca40100000.. is the Python digest"
+  "T6QP_HbruwMnHKhXO8G7amY4qYVlGL-B3OQyP-LfIRI"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.board-seed 41473200179623307258957694415769443739304335489542769187234381733079227613887 "k:ca40100000000000000000000000000000000000000000000000000000000003"))
+(expect "M3j.3 spin-key of it for spin 1"
+  "T6QP_HbruwMnHKhXO8G7amY4qYVlGL-B3OQyP-LfIRI|1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.spin-key "T6QP_HbruwMnHKhXO8G7amY4qYVlGL-B3OQyP-LfIRI" 1))
+(expect "M3k.3 key-stops of spin 1 is [31 56 1]"
+  [31 56 1]
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.key-stops "T6QP_HbruwMnHKhXO8G7amY4qYVlGL-B3OQyP-LfIRI|1"))
+(expect "M3l.3 play-board on machine 3: 6 units, payout 6.0"
+  { "stops": [ 31 56 1 29 63 61 11 55 43 4 42 26 48 20 51 13 63 31 60 55 52 8 43 54 36 36 11 39 29 14 ]
+  , "units": 6, "payout": 6.0 }
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-board 41473200179623307258957694415769443739304335489542769187234381733079227613887
+    "k:ca40100000000000000000000000000000000000000000000000000000000003" 3 10 1.0))
+;; machine 4 (free-spins): k:00000000000000000000000000000000000000000000000000000000f5ee000f, 20 spins at 0.1; per-spin units [0 0 3 0 0 0 0 0 2 18 0 2 2 0 0 2 0 2 0 0] (account found by boards.py: the first k:...f5ee0000+n whose 20 spins trigger; spin 10 triggers)
+(expect "M3i.4 board-seed of the round-1 seed and k:0000000000.. is the Python digest"
+  "jgUDmrVsSXN6_RUCP5_NQrjIrxD7WKE88na20XKCF6A"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.board-seed 41473200179623307258957694415769443739304335489542769187234381733079227613887 "k:00000000000000000000000000000000000000000000000000000000f5ee000f"))
+(expect "M3j.4 spin-key of it for spin 1"
+  "jgUDmrVsSXN6_RUCP5_NQrjIrxD7WKE88na20XKCF6A|1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.spin-key "jgUDmrVsSXN6_RUCP5_NQrjIrxD7WKE88na20XKCF6A" 1))
+(expect "M3k.4 key-stops of spin 1 is [24 30 33]"
+  [24 30 33]
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.key-stops "jgUDmrVsSXN6_RUCP5_NQrjIrxD7WKE88na20XKCF6A|1"))
+(expect "M3l.4 play-board on machine 4: 31 units, payout 3.1"
+  { "stops": [ 24 30 33 12 1 24 18 5 61 14 43 60 48 23 58 12 41 33 39 23 32 8 17 1 19 56 37 23 7 7
+              40 27 41 58 11 37 16 9 53 15 38 28 6 10 39 51 32 5 41 2 55 53 39 2 35 2 30 60 19 47 ]
+  , "units": 31, "payout": 3.1 }
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-board 41473200179623307258957694415769443739304335489542769187234381733079227613887
+    "k:00000000000000000000000000000000000000000000000000000000f5ee000f" 4 20 0.1))
+;; machine 5 (tumble): k:ca40100000000000000000000000000000000000000000000000000000000003, 10 spins at 0.3; per-spin units [0 0 0 0 0 0 7 0 7 0]
+(expect "M3i.5 board-seed of the round-1 seed and k:ca40100000.. is the Python digest"
+  "T6QP_HbruwMnHKhXO8G7amY4qYVlGL-B3OQyP-LfIRI"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.board-seed 41473200179623307258957694415769443739304335489542769187234381733079227613887 "k:ca40100000000000000000000000000000000000000000000000000000000003"))
+(expect "M3j.5 spin-key of it for spin 1"
+  "T6QP_HbruwMnHKhXO8G7amY4qYVlGL-B3OQyP-LfIRI|1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.spin-key "T6QP_HbruwMnHKhXO8G7amY4qYVlGL-B3OQyP-LfIRI" 1))
+(expect "M3k.5 key-stops of spin 1 is [31 56 1]"
+  [31 56 1]
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.key-stops "T6QP_HbruwMnHKhXO8G7amY4qYVlGL-B3OQyP-LfIRI|1"))
+(expect "M3l.5 play-board on machine 5: 14 units, payout 0.84"
+  { "stops": [ 31 56 1 29 63 61 11 55 43 4 42 26 48 20 51 13 63 31 60 55 52 8 43 54 36 36 11 39 29 14 ]
+  , "units": 14, "payout": 0.84 }
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-board 41473200179623307258957694415769443739304335489542769187234381733079227613887
+    "k:ca40100000000000000000000000000000000000000000000000000000000003" 5 10 0.3))
+;; CONTROL: the machine id changes the units, never the stops -- tumble on the free-spins board's account
+(expect "M3m CONTROL the same board on two machines shows the same stops"
+  true
+  (= (at 'stops (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-board 41473200179623307258957694415769443739304335489542769187234381733079227613887 "k:00000000000000000000000000000000000000000000000000000000f5ee000f" 4 20 0.1)) (at 'stops (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-board 41473200179623307258957694415769443739304335489542769187234381733079227613887 "k:00000000000000000000000000000000000000000000000000000000f5ee000f" 5 20 0.1))))
+(expect-failure "M3n a machine id past the table is refused by the list bound" "Array index out of bounds" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.spin-units 6 "probe|0"))
+(expect-failure "M3o a negative machine id is refused by the list bound" "Array index out of bounds" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.spin-units -1 "probe|0"))
+(commit-tx)
+
+;; ============================================================================
+;; M4 — THE CAP NEVER BINDS
+;; ============================================================================
+;; WHY: spin-units caps every spin at its machine's max-units, and each board reserves
+;; max-units / div times its stake. The cap is a guard, not a rule: if it ever bound, a player
+;; would be paid less than the paytable promises. Each machine's max-units is proven to be the
+;; true maximum, and each proof has a control showing the check can fail.
+(begin-tx "M4: the cap never binds")
+(expect "M4a.0 machine 0: the most any showing triple pays (computed here over the 216 literal pays) is its max-units 40"
+  true
+  (= (smartpacts.srules.imax (smartpacts.srules.live-pays (smartpacts.srules.tally smartpacts.srules.REEL-0) smartpacts.srules.LIST-0)) (at 'max-units (at 0 n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.MACHINES))))
+(expect "M4b.0 CONTROL machine 0 with three sevens paying one more than max-units: the check fails"
+  false
+  (= (smartpacts.srules.imax (smartpacts.srules.live-pays (smartpacts.srules.tally smartpacts.srules.REEL-0) (smartpacts.srules.put smartpacts.srules.LIST-0 172 41))) (at 'max-units (at 0 n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.MACHINES))))
+(expect "M4a.1 machine 1: the most any showing triple pays (computed here over the 216 literal pays) is its max-units 18"
+  true
+  (= (smartpacts.srules.imax (smartpacts.srules.live-pays (smartpacts.srules.tally smartpacts.srules.REEL-1) smartpacts.srules.LIST-1)) (at 'max-units (at 1 n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.MACHINES))))
+(expect "M4b.1 CONTROL machine 1 with three sevens paying one more than max-units: the check fails"
+  false
+  (= (smartpacts.srules.imax (smartpacts.srules.live-pays (smartpacts.srules.tally smartpacts.srules.REEL-1) (smartpacts.srules.put smartpacts.srules.LIST-1 172 19))) (at 'max-units (at 1 n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.MACHINES))))
+(expect "M4a.2 machine 2: the most any showing triple pays (computed here over the 216 literal pays) is its max-units 250"
+  true
+  (= (smartpacts.srules.imax (smartpacts.srules.live-pays (smartpacts.srules.tally smartpacts.srules.REEL-2) smartpacts.srules.LIST-2)) (at 'max-units (at 2 n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.MACHINES))))
+(expect "M4b.2 CONTROL machine 2 with three sevens paying one more than max-units: the check fails"
+  false
+  (= (smartpacts.srules.imax (smartpacts.srules.live-pays (smartpacts.srules.tally smartpacts.srules.REEL-2) (smartpacts.srules.put smartpacts.srules.LIST-2 172 251))) (at 'max-units (at 2 n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.MACHINES))))
+(expect "M4a.3 machine 3: the most any showing triple pays (computed here over the 216 literal pays) is its max-units 40"
+  true
+  (= (smartpacts.srules.imax (smartpacts.srules.live-pays (smartpacts.srules.tally smartpacts.srules.REEL-3) smartpacts.srules.LIST-3)) (at 'max-units (at 3 n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.MACHINES))))
+(expect "M4b.3 CONTROL machine 3 with three sevens paying one more than max-units: the check fails"
+  false
+  (= (smartpacts.srules.imax (smartpacts.srules.live-pays (smartpacts.srules.tally smartpacts.srules.REEL-3) (smartpacts.srules.put smartpacts.srules.LIST-3 172 41))) (at 'max-units (at 3 n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.MACHINES))))
+;; free spins: a triggering spin needs a scatter in the window of each of its three stops. If
+;; every such stop shows blank or scatter on the line, a triggering line reads blank-blank-blank
+;; (a scatter counts as a blank) and pays 0, so a triggering spin's return is the bonus alone,
+;; capped at FREE-CAP 100 inside free-bonus; a non-triggering spin pays at most the top line 40.
+;; rules_oracle.py: the 12 stops whose window holds a scatter are [6 7 8 22 23 24 38 39 40 54 55 56].
+(expect "M4c free-spins: the stops whose window holds a scatter, enumerated here over all 64"
+  [6 7 8 22 23 24 38 39 40 54 55 56]
+  (smartpacts.srules.scatter-stops smartpacts.srules.REEL-4))
+(expect "M4d free-spins: none of them shows anything but blank or scatter on the line"
+  []
+  (smartpacts.srules.trigger-line-offenders smartpacts.srules.REEL-4))
+(expect "M4e so a triggering line (blank blank blank) pays 0; a non-triggering spin pays at most the top line 40; the bonus stops at FREE-CAP 100 = max-units"
+  [0 40 100 100]
+  [(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.line-pay smartpacts.srules.PAYS-4 0 0 0) (smartpacts.srules.imax smartpacts.srules.PAYS-4) n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.FREE-CAP (at 'max-units (at 4 n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.MACHINES))])
+(expect "M4f the bonus reaches FREE-CAP exactly and is held there (hunt|440466: the uncapped walk of all 16 free spins would total 112, rules_oracle-style walk without the cap)"
+  100
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.spin-units 4 "hunt|440466"))
+;; CONTROL: a strip with a cherry beside a scatter (stop 6 -> cherry) fails the check at stop 6
+(expect "M4g CONTROL a cherry next to a scatter is caught"
+  [6]
+  (smartpacts.srules.trigger-line-offenders (smartpacts.srules.put smartpacts.srules.REEL-4 6 1)))
+(expect "M4h tumble: the oracle's enumerated maximum 563 line units (f_cascade.py 5 x ... printed max=563/5 =112.6; rules_oracle.py re-enumerated all 262,144) equals max-units"
+  true
+  (= 563 (at 'max-units (at 5 n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.MACHINES))))
+(expect "M4i tumble: the maximum is reached at stops [8 8 8] (rules_oracle.py argmax), uncapped by the contract"
+  563
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.tumble-units smartpacts.srules.REEL-5 smartpacts.srules.PAYS-5 [8 8 8]))
+(expect "M4j CONTROL the tumble check fails against an altered literal 564"
+  false
+  (= 564 (at 'max-units (at 5 n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.MACHINES))))
+(commit-tx)
+
+(print "slots-rules-testing.repl: ALL MACHINE RULES PINNED")
+
+
+;; ============================================================================
+;; M5  MUTATION-SWEEP GAPS (sweep of 1422c1f: 252 mutants, 234 killed; these three were
+;;     the real gaps). The tumble values are also reproduced by the independent oracle
+;;     f_cascade.simulate: [62 62 62] = 342, [1 1 24] = 63.
+;; ============================================================================
+;; GAP SW2: the strip WRAPS (stop 64 is stop 0). Only the tumble machine reads past stop 63
+;; (its columns read s, s+1, s+2 and refill from s+3 on). Stops [62 62 62], traced by hand from
+;; the literal tumble strip (pos 62=1, 63=0, 0=4, 1=3, 2=2, 3=1, 4=1, 5=2, 6=0, 7=1):
+;;   c1 cols [1 0 4]x3: row0 cherries 7 + row2 sevens 80           = 87  x1 =  87
+;;   c2 refill 65,66 -> [0 3 2]: row1 bars 35 + row2 bells 18        = 53  x2 = 106
+;;   c3 refill 67,68 -> [0 1 1]: row1 + row2 cherries 7 + 7          = 14  x3 =  42
+;;   c4 refill 69,70 -> [0 2 0]: row1 bells 18                        = 18  x4 =  72
+;;   c5 refill 71    -> [0 0 1]: row2 cherries 7                      =  7  x5 =  35
+;;                                                                    total      342
+;; With a clamping sym (mutant SW2) the column is [1 0 0] and the spin pays 7.
+(begin-tx)
+(namespace "n_48867b242317a0216a67f8c7ca26696b5878e0e3")
+(use slots)
+(expect "GAP-SW2 tumble-units at stops [62 62 62] wraps past stop 63 and pays 342 line units" 342
+  (tumble-units (at 'reel (at 5 MACHINES)) (at 'pays (at 5 MACHINES)) [62 62 62]))
+(expect "GAP-SW2b sym wraps both ways: stop 64 is stop 0, stop -1 is stop 63" [4 0]
+  [(sym (at 'reel (at 5 MACHINES)) 64) (sym (at 'reel (at 5 MACHINES)) -1)])
+(commit-tx)
+;; GAP T14: a column refills from the NEXT strip positions IN ORDER (ptr, ptr+1, ...). With the
+;; order reversed the cascade differs on 968 of the 262,144 stop triples (tools/tumble.py, a
+;; Python replica of tumble-units that reproduces the module's [62 62 62] = 342 and [8 8 8] = 563).
+;; Stops [1 1 24] pay 63 line units in order and 117 reversed.
+(begin-tx)
+(namespace "n_48867b242317a0216a67f8c7ca26696b5878e0e3")
+(use slots)
+(expect "GAP-T14 tumble-units at stops [1 1 24] refills in strip order and pays 63" 63
+  (tumble-units (at 'reel (at 5 MACHINES)) (at 'pays (at 5 MACHINES)) [1 1 24]))
+(commit-tx)
+;; GAP LB4 (masked pair): "at most FREE-MAX free spins ever run" is held by TWO sites -- the
+;; FREE-MAX clamp on `granted` and the fold's bound (enumerate 1 FREE-MAX). Either alone is
+;; redundant; removing both lets a 25th free spin run. Bonus key "lb4-576" (found by
+;; tools/freehunt.py, a Python replica of key-stops/free-look validated against the module's
+;; key-stops) retriggers at free spins 2, 5 and 22 (8+8+8+8 = 32 granted, clamped to 24).
+;; Its 24 spins pay 16 line units (spins 3,12,13,14,15,18,19,21 at 2 each) x FREE-MULT 2 = 32;
+;; the 25th spin (stops [41 0 49] -> bar, seven, bar = any three high, 5 units) would add
+;; 2 x 5 = 10, so the mutant pays 42.
+(begin-tx)
+(namespace "n_48867b242317a0216a67f8c7ca26696b5878e0e3")
+(use slots)
+(expect "GAP-LB4a free spin 25 of key lb4-576 WOULD pay (so a 25th spin is observable)" 5
+  (at 'win (free-look (at 'reel (at 4 MACHINES)) (at 'pays (at 4 MACHINES)) (key-stops "lb4-576|25"))))
+(expect "GAP-LB4b three retriggers inside the first 24 free spins (2, 5, 22)" [2 5 22]
+  (filter (lambda (j:integer) (at 'trigger (free-look (at 'reel (at 4 MACHINES)) (at 'pays (at 4 MACHINES)) (key-stops (format "lb4-576|{}" [j])))))
+          (enumerate 1 24)))
+(expect "GAP-LB4 the bonus runs exactly FREE-MAX = 24 free spins and pays 32, never the 25th" 32
+  (free-bonus (at 'reel (at 4 MACHINES)) (at 'pays (at 4 MACHINES)) "lb4-576"))
+(commit-tx)
+
+;; ============================================================================
+;; M5 — A BOARD OF SEVERAL MACHINES
+;; ============================================================================
+;; WHY: a board is a list of entries, one per machine, and its spins are numbered ACROSS the
+;; entries in the order signed: entry 1 plays spins 1..n1, entry 2 continues at n1 + 1. What the
+;; player is promised is that numbering, each entry scored on its own machine, and a payout that
+;; is the sum over entries of floor(stake x units / div, 12). Each board below is pinned whole
+;; (every stop, the units of each entry, the payout) against the independent oracle; the
+;; one-entry board is pinned equal to play-board, so every earlier literal holds; the reserve and
+;; the fee are pinned as per-entry sums.
+;; HOW THE LITERALS WERE PRODUCED. Python 3 only, never this module:
+;; a generator (`gen_rules.py`, not published) writes this block from `eo.py`, which scores each
+;; spin with a second independent oracle (a re-implementation of the six machines from the spec,
+;; not published) and adds only the board numbering: the
+;; keys of entry k are "{board seed}|{i}" for i = 1 + (spins of the entries before it) onward.
+;; eo.py reproduces the specification's REPL smoke values (alice 9 units / 0.9; bob's three-entry board
+;; 1.78 with reserve 181.3). Reserve = sum of MAX-MULT x stake x spins with the multipliers as
+;; literals 40 18 250 40 100 563/5; fee = sum of floor(scale x EDGE x total, 12), EDGE = floor at 30
+;; places of 1 - return, from the return fractions pinned in M2a.
+(begin-tx "M5: boards of several machines")
+;; M5a: bob, three machines: free-spins 0.05 x 20, tumble 0.05 x 10, big 0.01 x 10; per-entry units [18 68 20]
+(expect "M5a play-entries, bob, three machines: free-spins 0.05 x 20, tumble 0.05 x 10, big 0.01 x 10: every stop, units [18 68 20] per entry, payout 1.78"
+  { "stops": [ 43 5 45 48 59 14 16 48 61 50 52 43 3 16 54 51 47 53 10 23 52 17 62 32 40 23 23 14 37 14
+              56 30 44 31 7 14 5 46 46 38 56 31 61 37 15 47 46 18 56 63 12 19 25 12 40 27 20 60 62 59
+              15 1 10 7 8 59 41 2 49 43 44 22 47 0 63 30 21 7 51 31 52 34 22 0 45 56 15 16 4 38
+              28 50 56 5 9 10 23 21 28 17 57 56 0 2 23 40 24 50 51 54 57 50 46 58 18 31 42 22 26 11 ]
+  , "units": [18 68 20], "payout": 1.78 }
+  (let ((p (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-entries 41473200179623307258957694415769443739304335489542769187234381733079227613887
+             "k:b0b0000000000000000000000000000000000000000000000000000000000002"
+             [{ "machine": 4, "stake": 0.05, "spins": 20 } { "machine": 5, "stake": 0.05, "spins": 10 } { "machine": 2, "stake": 0.01, "spins": 10 }])))
+    { "stops": (at 'stops p), "units": (at 'units p), "payout": (at 'payout p) }))
+(expect "M5ar entries-reserve of it is 181.3 (sum of MAX-MULT x stake x spins)" 181.3
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.entries-reserve [{ "machine": 4, "stake": 0.05, "spins": 20 } { "machine": 5, "stake": 0.05, "spins": 10 } { "machine": 2, "stake": 0.01, "spins": 10 }]))
+(expect "M5af entries-fee of it at scale 1.0 is 0.059454431154" 0.059454431154
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.entries-fee [{ "machine": 4, "stake": 0.05, "spins": 20 } { "machine": 5, "stake": 0.05, "spins": 10 } { "machine": 2, "stake": 0.01, "spins": 10 }] 1.0))
+(expect "M5af entries-fee of it at scale 0.5 is 0.029727215577" 0.029727215577
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.entries-fee [{ "machine": 4, "stake": 0.05, "spins": 20 } { "machine": 5, "stake": 0.05, "spins": 10 } { "machine": 2, "stake": 0.01, "spins": 10 }] 0.5))
+(expect "M5af entries-fee of it at scale 0.333333333333 is 0.019818143716" 0.019818143716
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.entries-fee [{ "machine": 4, "stake": 0.05, "spins": 20 } { "machine": 5, "stake": 0.05, "spins": 10 } { "machine": 2, "stake": 0.01, "spins": 10 }] 0.333333333333))
+;; M5b: alice, ALL SIX machines: wild 1.0 x 3, classic 0.1 x 20, tumble 0.3 x 5, easy 0.2 x 4, free-spins 0.1 x 7, big 0.5 x 2; per-entry units [0 11 7 6 4 4]
+(expect "M5b play-entries, alice, ALL SIX machines: wild 1.0 x 3, classic 0.1 x 20, tumble 0.3 x 5, easy 0.2 x 4, free-spins 0.1 x 7, big 0.5 x 2: every stop, units [0 11 7 6 4 4] per entry, payout 5.12"
+  { "stops": [ 47 20 0 25 12 60 4 33 52 1 7 13 6 6 46 14 54 3 26 51 39 40 27 52 1 33 51 7 18 48
+              18 58 6 47 30 41 7 55 59 8 55 1 38 15 52 62 43 16 32 31 51 16 40 43 23 5 10 28 57 23
+              30 2 23 62 4 33 56 38 21 0 61 63 49 58 41 62 10 51 24 37 4 43 59 27 43 15 23 24 16 34
+              44 49 63 54 50 11 44 34 51 21 25 42 27 15 44 49 21 55 11 7 26 9 58 28 60 24 63 51 17 18
+              59 46 6 ]
+  , "units": [0 11 7 6 4 4], "payout": 5.12 }
+  (let ((p (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-entries 41473200179623307258957694415769443739304335489542769187234381733079227613887
+             "k:a11ce00000000000000000000000000000000000000000000000000000000001"
+             [{ "machine": 3, "stake": 1.0, "spins": 3 } { "machine": 0, "stake": 0.1, "spins": 20 } { "machine": 5, "stake": 0.3, "spins": 5 } { "machine": 1, "stake": 0.2, "spins": 4 } { "machine": 4, "stake": 0.1, "spins": 7 } { "machine": 2, "stake": 0.5, "spins": 2 }])))
+    { "stops": (at 'stops p), "units": (at 'units p), "payout": (at 'payout p) }))
+(expect "M5br entries-reserve of it is 703.3 (sum of MAX-MULT x stake x spins)" 703.3
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.entries-reserve [{ "machine": 3, "stake": 1.0, "spins": 3 } { "machine": 0, "stake": 0.1, "spins": 20 } { "machine": 5, "stake": 0.3, "spins": 5 } { "machine": 1, "stake": 0.2, "spins": 4 } { "machine": 4, "stake": 0.1, "spins": 7 } { "machine": 2, "stake": 0.5, "spins": 2 }]))
+(expect "M5bf entries-fee of it at scale 1.0 is 0.357265074463" 0.357265074463
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.entries-fee [{ "machine": 3, "stake": 1.0, "spins": 3 } { "machine": 0, "stake": 0.1, "spins": 20 } { "machine": 5, "stake": 0.3, "spins": 5 } { "machine": 1, "stake": 0.2, "spins": 4 } { "machine": 4, "stake": 0.1, "spins": 7 } { "machine": 2, "stake": 0.5, "spins": 2 }] 1.0))
+(expect "M5bf entries-fee of it at scale 0.5 is 0.178632537231" 0.178632537231
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.entries-fee [{ "machine": 3, "stake": 1.0, "spins": 3 } { "machine": 0, "stake": 0.1, "spins": 20 } { "machine": 5, "stake": 0.3, "spins": 5 } { "machine": 1, "stake": 0.2, "spins": 4 } { "machine": 4, "stake": 0.1, "spins": 7 } { "machine": 2, "stake": 0.5, "spins": 2 }] 0.5))
+(expect "M5bf entries-fee of it at scale 0.333333333333 is 0.119088358152" 0.119088358152
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.entries-fee [{ "machine": 3, "stake": 1.0, "spins": 3 } { "machine": 0, "stake": 0.1, "spins": 20 } { "machine": 5, "stake": 0.3, "spins": 5 } { "machine": 1, "stake": 0.2, "spins": 4 } { "machine": 4, "stake": 0.1, "spins": 7 } { "machine": 2, "stake": 0.5, "spins": 2 }] 0.333333333333))
+;; M5c: the free-spins fixture account, tumble 0.1 x 20 THEN free-spins 0.1 x 20 (free-spins plays spins 21..40); per-entry units [175 15]
+(expect "M5c play-entries, the free-spins fixture account, tumble 0.1 x 20 THEN free-spins 0.1 x 20 (free-spins plays spins 21..40): every stop, units [175 15] per entry, payout 5.0"
+  { "stops": [ 24 30 33 12 1 24 18 5 61 14 43 60 48 23 58 12 41 33 39 23 32 8 17 1 19 56 37 23 7 7
+              40 27 41 58 11 37 16 9 53 15 38 28 6 10 39 51 32 5 41 2 55 53 39 2 35 2 30 60 19 47
+              12 55 42 43 28 39 27 45 8 12 61 9 29 49 32 26 42 2 47 19 9 13 20 45 13 6 8 30 22 58
+              22 39 13 50 10 12 49 34 31 19 28 54 10 57 59 23 36 38 61 33 63 54 54 44 26 41 44 30 34 52 ]
+  , "units": [175 15], "payout": 5.0 }
+  (let ((p (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-entries 41473200179623307258957694415769443739304335489542769187234381733079227613887
+             "k:00000000000000000000000000000000000000000000000000000000f5ee000f"
+             [{ "machine": 5, "stake": 0.1, "spins": 20 } { "machine": 4, "stake": 0.1, "spins": 20 }])))
+    { "stops": (at 'stops p), "units": (at 'units p), "payout": (at 'payout p) }))
+(expect "M5cr entries-reserve of it is 425.2 (sum of MAX-MULT x stake x spins)" 425.2
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.entries-reserve [{ "machine": 5, "stake": 0.1, "spins": 20 } { "machine": 4, "stake": 0.1, "spins": 20 }]))
+(expect "M5cf entries-fee of it at scale 1.0 is 0.151379565434" 0.151379565434
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.entries-fee [{ "machine": 5, "stake": 0.1, "spins": 20 } { "machine": 4, "stake": 0.1, "spins": 20 }] 1.0))
+(expect "M5cf entries-fee of it at scale 0.5 is 0.075689782717" 0.075689782717
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.entries-fee [{ "machine": 5, "stake": 0.1, "spins": 20 } { "machine": 4, "stake": 0.1, "spins": 20 }] 0.5))
+(expect "M5cf entries-fee of it at scale 0.333333333333 is 0.050459855144" 0.050459855144
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.entries-fee [{ "machine": 5, "stake": 0.1, "spins": 20 } { "machine": 4, "stake": 0.1, "spins": 20 }] 0.333333333333))
+;; M5d: carol, two machines: big 0.5 x 10, tumble 0.3 x 10 (tumble plays spins 11..20); per-entry units [0 7]
+(expect "M5d play-entries, carol, two machines: big 0.5 x 10, tumble 0.3 x 10 (tumble plays spins 11..20): every stop, units [0 7] per entry, payout 0.42"
+  { "stops": [ 31 56 1 29 63 61 11 55 43 4 42 26 48 20 51 13 63 31 60 55 52 8 43 54 36 36 11 39 29 14
+              16 43 39 40 38 9 16 32 46 34 37 11 50 26 25 35 57 48 31 14 3 24 59 27 30 13 49 36 23 63 ]
+  , "units": [0 7], "payout": 0.42 }
+  (let ((p (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-entries 41473200179623307258957694415769443739304335489542769187234381733079227613887
+             "k:ca40100000000000000000000000000000000000000000000000000000000003"
+             [{ "machine": 2, "stake": 0.5, "spins": 10 } { "machine": 5, "stake": 0.3, "spins": 10 }])))
+    { "stops": (at 'stops p), "units": (at 'units p), "payout": (at 'payout p) }))
+(expect "M5dr entries-reserve of it is 1587.8 (sum of MAX-MULT x stake x spins)" 1587.8
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.entries-reserve [{ "machine": 2, "stake": 0.5, "spins": 10 } { "machine": 5, "stake": 0.3, "spins": 10 }]))
+(expect "M5df entries-fee of it at scale 1.0 is 0.321630859375" 0.321630859375
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.entries-fee [{ "machine": 2, "stake": 0.5, "spins": 10 } { "machine": 5, "stake": 0.3, "spins": 10 }] 1.0))
+(expect "M5df entries-fee of it at scale 0.5 is 0.160815429687" 0.160815429687
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.entries-fee [{ "machine": 2, "stake": 0.5, "spins": 10 } { "machine": 5, "stake": 0.3, "spins": 10 }] 0.5))
+(expect "M5df entries-fee of it at scale 0.333333333333 is 0.107210286457" 0.107210286457
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.entries-fee [{ "machine": 2, "stake": 0.5, "spins": 10 } { "machine": 5, "stake": 0.3, "spins": 10 }] 0.333333333333))
+;; the stops depend on the spin index alone, never the machine: the six-entry board's 41 spins stop
+;; exactly where a 41-spin one-machine board of the same account stops, so the numbering runs on
+;; across entries and never restarts
+(expect "M5e the six-entry board's stops are the first 41 spins of alice's key stream, numbered across entries" true
+  (= (at 'stops (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-entries 41473200179623307258957694415769443739304335489542769187234381733079227613887 "k:a11ce00000000000000000000000000000000000000000000000000000000001" [{ "machine": 3, "stake": 1.0, "spins": 3 } { "machine": 0, "stake": 0.1, "spins": 20 } { "machine": 5, "stake": 0.3, "spins": 5 } { "machine": 1, "stake": 0.2, "spins": 4 } { "machine": 4, "stake": 0.1, "spins": 7 } { "machine": 2, "stake": 0.5, "spins": 2 }]))
+     (at 'stops (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-board 41473200179623307258957694415769443739304335489542769187234381733079227613887 "k:a11ce00000000000000000000000000000000000000000000000000000000001" 0 41 1.0))))
+(expect "M5e1 CONTROL a numbering that restarted at 1 for every entry would give other stops" false
+  (= (at 'stops (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-entries 41473200179623307258957694415769443739304335489542769187234381733079227613887 "k:a11ce00000000000000000000000000000000000000000000000000000000001" [{ "machine": 3, "stake": 1.0, "spins": 3 } { "machine": 0, "stake": 0.1, "spins": 20 } { "machine": 5, "stake": 0.3, "spins": 5 } { "machine": 1, "stake": 0.2, "spins": 4 } { "machine": 4, "stake": 0.1, "spins": 7 } { "machine": 2, "stake": 0.5, "spins": 2 }]))
+     (+ (at 'stops (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-board 41473200179623307258957694415769443739304335489542769187234381733079227613887 "k:a11ce00000000000000000000000000000000000000000000000000000000001" 3 3 1.0)) (+ (at 'stops (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-board 41473200179623307258957694415769443739304335489542769187234381733079227613887 "k:a11ce00000000000000000000000000000000000000000000000000000000001" 0 20 1.0)) (+ (at 'stops (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-board 41473200179623307258957694415769443739304335489542769187234381733079227613887 "k:a11ce00000000000000000000000000000000000000000000000000000000001" 5 5 1.0)) (+ (at 'stops (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-board 41473200179623307258957694415769443739304335489542769187234381733079227613887 "k:a11ce00000000000000000000000000000000000000000000000000000000001" 1 4 1.0)) (+ (at 'stops (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-board 41473200179623307258957694415769443739304335489542769187234381733079227613887 "k:a11ce00000000000000000000000000000000000000000000000000000000001" 4 7 1.0)) (at 'stops (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-board 41473200179623307258957694415769443739304335489542769187234381733079227613887 "k:a11ce00000000000000000000000000000000000000000000000000000000001" 2 2 1.0)))))))))
+;; the same two entries in the other order: free-spins takes spins 1..20 (the M3l.4 board, 31 units),
+;; tumble 21..40; units [31 63], payout 4.36 against M5c's [175 15] / 5.0
+(expect "M5f the entries in the other order play other spins: units [31 63], payout 4.36"
+  { "units": [31 63], "payout": 4.36 }
+  (let ((p (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-entries 41473200179623307258957694415769443739304335489542769187234381733079227613887 "k:00000000000000000000000000000000000000000000000000000000f5ee000f" [{ "machine": 4, "stake": 0.1, "spins": 20 } { "machine": 5, "stake": 0.1, "spins": 20 }])))
+    { "units": (at 'units p), "payout": (at 'payout p) }))
+;; a one-entry board plays EXACTLY as play-board: the six M3l boards again, through play-entries
+(expect "M5g.0 a one-entry play-entries on machine 0 equals play-board: same stops, units [9], payout 0.9" true
+  (let ((pe (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-entries 41473200179623307258957694415769443739304335489542769187234381733079227613887 "k:a11ce00000000000000000000000000000000000000000000000000000000001" [{ "machine": 0, "stake": 0.1, "spins": 20 }]))
+        (pb (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-board 41473200179623307258957694415769443739304335489542769187234381733079227613887 "k:a11ce00000000000000000000000000000000000000000000000000000000001" 0 20 0.1)))
+    (and (= (at 'stops pe) (at 'stops pb))
+         (and (= (at 'units pe) [(at 'units pb)]) (and (= (at 'units pe) [9]) (= (at 'payout pe) (at 'payout pb)))))))
+(expect "M5h.0 a one-entry reserve is board-reserve, 80.0, and its fee at scale 0.5 is fee-for, 0.0400390625" [80.0 0.0400390625]
+  (let ((es [{ "machine": 0, "stake": 0.1, "spins": 20 }]))
+    (enforce (= (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.entries-reserve es) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.board-reserve 0 (* 0.1 20.0))) "reserve differs from board-reserve")
+    (enforce (= (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.entries-fee es 0.5) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.fee-for 0 (* 0.1 20.0) 0.5)) "fee differs from fee-for")
+    [(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.entries-reserve es) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.entries-fee es 0.5)]))
+(expect "M5g.1 a one-entry play-entries on machine 1 equals play-board: same stops, units [4], payout 0.8" true
+  (let ((pe (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-entries 41473200179623307258957694415769443739304335489542769187234381733079227613887 "k:a11ce00000000000000000000000000000000000000000000000000000000001" [{ "machine": 1, "stake": 0.2, "spins": 5 }]))
+        (pb (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-board 41473200179623307258957694415769443739304335489542769187234381733079227613887 "k:a11ce00000000000000000000000000000000000000000000000000000000001" 1 5 0.2)))
+    (and (= (at 'stops pe) (at 'stops pb))
+         (and (= (at 'units pe) [(at 'units pb)]) (and (= (at 'units pe) [4]) (= (at 'payout pe) (at 'payout pb)))))))
+(expect "M5h.1 a one-entry reserve is board-reserve, 18.0, and its fee at scale 0.5 is fee-for, 0.02001953125" [18.0 0.02001953125]
+  (let ((es [{ "machine": 1, "stake": 0.2, "spins": 5 }]))
+    (enforce (= (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.entries-reserve es) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.board-reserve 1 (* 0.2 5.0))) "reserve differs from board-reserve")
+    (enforce (= (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.entries-fee es 0.5) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.fee-for 1 (* 0.2 5.0) 0.5)) "fee differs from fee-for")
+    [(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.entries-reserve es) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.entries-fee es 0.5)]))
+(expect "M5g.2 a one-entry play-entries on machine 2 equals play-board: same stops, units [4], payout 2.0" true
+  (let ((pe (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-entries 41473200179623307258957694415769443739304335489542769187234381733079227613887 "k:b0b0000000000000000000000000000000000000000000000000000000000002" [{ "machine": 2, "stake": 0.5, "spins": 10 }]))
+        (pb (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-board 41473200179623307258957694415769443739304335489542769187234381733079227613887 "k:b0b0000000000000000000000000000000000000000000000000000000000002" 2 10 0.5)))
+    (and (= (at 'stops pe) (at 'stops pb))
+         (and (= (at 'units pe) [(at 'units pb)]) (and (= (at 'units pe) [4]) (= (at 'payout pe) (at 'payout pb)))))))
+(expect "M5h.2 a one-entry reserve is board-reserve, 1250.0, and its fee at scale 0.5 is fee-for, 0.10009765625" [1250.0 0.10009765625]
+  (let ((es [{ "machine": 2, "stake": 0.5, "spins": 10 }]))
+    (enforce (= (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.entries-reserve es) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.board-reserve 2 (* 0.5 10.0))) "reserve differs from board-reserve")
+    (enforce (= (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.entries-fee es 0.5) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.fee-for 2 (* 0.5 10.0) 0.5)) "fee differs from fee-for")
+    [(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.entries-reserve es) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.entries-fee es 0.5)]))
+(expect "M5g.3 a one-entry play-entries on machine 3 equals play-board: same stops, units [6], payout 6.0" true
+  (let ((pe (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-entries 41473200179623307258957694415769443739304335489542769187234381733079227613887 "k:ca40100000000000000000000000000000000000000000000000000000000003" [{ "machine": 3, "stake": 1.0, "spins": 10 }]))
+        (pb (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-board 41473200179623307258957694415769443739304335489542769187234381733079227613887 "k:ca40100000000000000000000000000000000000000000000000000000000003" 3 10 1.0)))
+    (and (= (at 'stops pe) (at 'stops pb))
+         (and (= (at 'units pe) [(at 'units pb)]) (and (= (at 'units pe) [6]) (= (at 'payout pe) (at 'payout pb)))))))
+(expect "M5h.3 a one-entry reserve is board-reserve, 400.0, and its fee at scale 0.5 is fee-for, 0.199584960937" [400.0 0.199584960937]
+  (let ((es [{ "machine": 3, "stake": 1.0, "spins": 10 }]))
+    (enforce (= (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.entries-reserve es) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.board-reserve 3 (* 1.0 10.0))) "reserve differs from board-reserve")
+    (enforce (= (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.entries-fee es 0.5) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.fee-for 3 (* 1.0 10.0) 0.5)) "fee differs from fee-for")
+    [(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.entries-reserve es) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.entries-fee es 0.5)]))
+(expect "M5g.4 a one-entry play-entries on machine 4 equals play-board: same stops, units [31], payout 3.1" true
+  (let ((pe (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-entries 41473200179623307258957694415769443739304335489542769187234381733079227613887 "k:00000000000000000000000000000000000000000000000000000000f5ee000f" [{ "machine": 4, "stake": 0.1, "spins": 20 }]))
+        (pb (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-board 41473200179623307258957694415769443739304335489542769187234381733079227613887 "k:00000000000000000000000000000000000000000000000000000000f5ee000f" 4 20 0.1)))
+    (and (= (at 'stops pe) (at 'stops pb))
+         (and (= (at 'units pe) [(at 'units pb)]) (and (= (at 'units pe) [31]) (= (at 'payout pe) (at 'payout pb)))))))
+(expect "M5h.4 a one-entry reserve is board-reserve, 200.0, and its fee at scale 0.5 is fee-for, 0.035211267092" [200.0 0.035211267092]
+  (let ((es [{ "machine": 4, "stake": 0.1, "spins": 20 }]))
+    (enforce (= (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.entries-reserve es) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.board-reserve 4 (* 0.1 20.0))) "reserve differs from board-reserve")
+    (enforce (= (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.entries-fee es 0.5) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.fee-for 4 (* 0.1 20.0) 0.5)) "fee differs from fee-for")
+    [(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.entries-reserve es) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.entries-fee es 0.5)]))
+(expect "M5g.5 a one-entry play-entries on machine 5 equals play-board: same stops, units [14], payout 0.84" true
+  (let ((pe (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-entries 41473200179623307258957694415769443739304335489542769187234381733079227613887 "k:ca40100000000000000000000000000000000000000000000000000000000003" [{ "machine": 5, "stake": 0.3, "spins": 10 }]))
+        (pb (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-board 41473200179623307258957694415769443739304335489542769187234381733079227613887 "k:ca40100000000000000000000000000000000000000000000000000000000003" 5 10 0.3)))
+    (and (= (at 'stops pe) (at 'stops pb))
+         (and (= (at 'units pe) [(at 'units pb)]) (and (= (at 'units pe) [14]) (= (at 'payout pe) (at 'payout pb)))))))
+(expect "M5h.5 a one-entry reserve is board-reserve, 337.8, and its fee at scale 0.5 is fee-for, 0.060717773437" [337.8 0.060717773437]
+  (let ((es [{ "machine": 5, "stake": 0.3, "spins": 10 }]))
+    (enforce (= (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.entries-reserve es) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.board-reserve 5 (* 0.3 10.0))) "reserve differs from board-reserve")
+    (enforce (= (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.entries-fee es 0.5) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.fee-for 5 (* 0.3 10.0) 0.5)) "fee differs from fee-for")
+    [(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.entries-reserve es) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.entries-fee es 0.5)]))
+;; the fee is floored PER ENTRY: on the six-entry board at scale 1 the per-entry floors sum to
+;; 0.357265074463, one unit below 0.357265074464, the floor of the unfloored sum -- so a fee floored per board
+;; instead of per entry would be caught by M5bf above
+(expect "M5i CONTROL the per-entry floors (0.357265074463) sit one unit under the board-level floor (0.357265074464)" true
+  (< (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.entries-fee [{ "machine": 3, "stake": 1.0, "spins": 3 } { "machine": 0, "stake": 0.1, "spins": 20 } { "machine": 5, "stake": 0.3, "spins": 5 } { "machine": 1, "stake": 0.2, "spins": 4 } { "machine": 4, "stake": 0.1, "spins": 7 } { "machine": 2, "stake": 0.5, "spins": 2 }] 1.0) 0.357265074464))
+(expect "M5j an empty entry list reserves nothing and pays no fee (bet refuses it; the sums start at 0.0)" [0.0 0.0]
+  [(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.entries-reserve []) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.entries-fee [] 1.0)])
+(commit-tx)

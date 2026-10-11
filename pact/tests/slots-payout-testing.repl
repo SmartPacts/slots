@@ -1,0 +1,495 @@
+;; slots-payout-testing.repl — settling a whole round's boards at once.
+;;
+;; The house's helper settles boards. At scale a round can hold hundreds of
+;; boards, so the helper must be able to settle many in ONE transaction: each
+;; winning claim installs its own coin.TRANSFER for a DIFFERENT receiver, and
+;; Pact's managed-cap identity is (sender, receiver), so distinct receivers never
+;; collide. In slots a LOSING board's claim SUCCEEDS too -- it releases the
+;; board's reserve -- so a batch may mix winners and losers freely. Pinned here
+;; so the batching the bot relies on is a contract property, not a belief. Also
+;; pinned: the two ways a batch still aborts as a whole (an account listed twice,
+;; a board already settled), which is why the bot dry-runs every claim before it
+;; puts it in a batch and builds each batch as a set.
+;;
+;; The machines differ in what a claim COSTS: a classic spin is one hash, a
+;; free-spins spin that triggers plays up to 24 more, a tumble spin walks up to
+;; five cascades. PAY-2 settles a round whose boards spread over all six
+;; machines; PAY-4 settles ten of the heaviest 20-spin free-spins boards found
+;; and prints the gas of each claim; PAY-5 bounds the claim of a MAX-SPINS board on
+;; EACH machine (a board plays one machine) at its heaviest possible outcome,
+;; which is what MAX-SPINS and the crank's claim sizing are set from.
+;;
+;; Every expected payout below comes from the independent Python oracle
+;; (`oracle.py`, not published: BLAKE2b-256 -> base64url -> big-endian
+;; integer, three 6-bit stops; the line machines scored by the model's
+;; `common.pay3`, wild by `e_wild.mkpay(..., 'double')`, tumble by
+;; `f_cascade.simulate`, free spins by a per-key walk of `d_free.bonus_dist`'s
+;; recursion; it reproduces all 2,544 units of the parity harness `diff/py.json`),
+;; applied to the round seed the verifier returns and each account.
+
+(load "slots-test-init.repl")
+
+(env-chain-data { "block-time": (time "2026-09-20T17:43:43Z") })
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.initialize n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT 100000.0)
+(commit-tx)
+(env-sigs [{"key":"h0u5e00000000000000000000000000000000000000000000000000000000004"
+           ,"caps":[(coin.TRANSFER "house-funder" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 500000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.fund-house "house-funder" 500000.0)
+(commit-tx)
+
+;; forty-one boards (a board plays one machine). Player-i plays machine
+;; ((i-1) mod 6), ((i-1) mod 20)+1 spins at a stake per spin of [0.1 0.25 0.5] at
+;; (i mod 3), so every machine, every spin count 1..20 and all three stakes appear
+;; (`pay.entries-of`). Exposure = sum over boards of MAX-MULT[machine] x board total =
+;; 7658.16 (Python Fraction, multipliers 40 18 250 40 100 563/5), inside the table limit
+;; 0.02 x 500000 = 10000.
+(env-enable-repl-natives true)
+(begin-tx)
+(module pay PG (defcap PG () (enforce true "ok"))
+  (defconst SIG "0d745db068db9e16379a49f65d76353d721d79fb459d20b33a50e750e5cdb10400af36e03d4a8414b3a86770d1d1e90e85462dce40b3cf5c27f9fdb477b6f6e0")
+  (defun acct:string (i:integer) (format "player-{}" [i]))
+  (defun spins-of:integer (i:integer) (+ 1 (mod (- i 1) 20)))
+  (defun machine-of:integer (i:integer) (mod (- i 1) 6))
+  (defun stake-of:decimal (i:integer) (at (mod i 3) [0.1 0.25 0.5]))
+  ;; the board of player-i: one entry, one machine
+  (defun entries-of:[object] (i:integer)
+    [{ "machine": (machine-of i), "stake": (stake-of i), "spins": (spins-of i) }])
+  (defun total-of:decimal (es:[object])
+    (fold (+) 0.0 (map (lambda (e:object) (* (at 'stake e) (dec (at 'spins e)))) es)))
+  (defun spins-in:integer (es:[object]) (fold (+) 0 (map (lambda (e:object) (at 'spins e)) es)))
+  (defun place-as:string (a:string es:[object])
+    (env-sigs [{"key":"p00000000000000000000000000000000000000000000000000000000000000p"
+               ,"caps":[(coin.TRANSFER a (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) (total-of es))]}])
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet a { "entries": es }))
+  (defun place-board:string (i:integer m:integer stake:decimal spins:integer)
+    (place-as (acct i) [{ "machine": m, "stake": stake, "spins": spins }]))
+  (defun place:string (i:integer) (place-as (acct i) (entries-of i)))
+  (defun claim-all:[string] (seq:integer is:[integer])
+    (map (lambda (i:integer) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim seq (acct i))) is))
+  (defun balances:[decimal] (is:[integer])
+    (map (lambda (i:integer) (coin.get-balance (acct i))) is))
+  ;; the gas of each claim on its own, in batch order: the meter is read before
+  ;; and after every claim inside ONE transaction
+  (defun claim-gas:[integer] (seq:integer accts:[string])
+    (map (lambda (a:string)
+           (let* ((g0 (env-gas))
+                  (r (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim seq a))
+                  (g1 (env-gas)))
+             (- g1 g0)))
+         accts)))
+(commit-tx)
+(env-data { "pk": { "keys": ["p00000000000000000000000000000000000000000000000000000000000000p"], "pred": "keys-all" } })
+(begin-tx)
+(test-capability (coin.COINBASE))
+(map (lambda (i:integer) (coin.coinbase (pay.acct i) (read-keyset "pk") 100.0)) (enumerate 1 41))
+(commit-tx)
+(begin-tx)
+(map (pay.place) (enumerate 1 41))
+(expect "PAY-0 PRECONDITION forty-one boards sit in round 1" 41
+  (length (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.round-boards 1)))
+(expect "PAY-0p PRECONDITION and they are one round's boards: round-seq is 1" 1
+  (at 'round-seq (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params)))
+(expect "PAY-0q0 PRECONDITION the boards' first entries spread over all six machines" [0 1 2 3 4 5 4]
+  (map (lambda (i:integer) (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 (pay.acct i)))))) [1 2 3 4 5 6 41]))
+(expect "PAY-0q PRECONDITION the first entries' spin counts span 1..20" [1 20 1]
+  [(at 'spins (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 "player-1"))))
+   (at 'spins (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 "player-20"))))
+   (at 'spins (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 "player-41"))))])
+(expect "PAY-0q1 PRECONDITION every one of the 41 boards holds one machine: 41 entries in all" [0 41]
+  (let ((bs (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.round-boards 1)))
+    [(length (filter (lambda (b:object{n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.board}) (> (length (at 'entries b)) 1)) bs))
+     (fold (+) 0 (map (lambda (b:object{n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.board}) (length (at 'entries b))) bs))]))
+(expect "PAY-0q2 PRECONDITION player-3's board holds the big machine alone" [2]
+  (map (lambda (e:object) (at 'machine e)) (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 "player-3"))))
+(expect "PAY-0r PRECONDITION the round's exposure is the sum over boards of machine maximum x board total" 7658.16
+  (at 'exposure (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)))
+(commit-tx)
+(env-sigs [])
+
+(env-chain-data { "block-time": (time "2026-09-20T17:47:00Z") })
+(begin-tx)
+(expect "PAY-0a the round resolves to the measured seed"
+  41473200179623307258957694415769443739304335489542769187234381733079227613887
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.resolve 1 pay.SIG))
+(expect "PAY-0b the round now holds its whole exposure as liability" 7658.16
+  (at 'liability (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)))
+(expect "PAY-0c and the game's reserve is exactly that liability: the fee left at resolve" 7658.16
+  (at 'reserved (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params)))
+(commit-tx)
+
+;; ============================================================================
+;; PAY-1  THE SAME ACCOUNT TWICE IN ONE BATCH ABORTS AS A WHOLE
+;;   The second claim reads a board the first already marked claimed. This is
+;;   why the helper builds each batch as a set. Mutating expect-failure, so the
+;;   block ends in rollback-tx.
+;; ============================================================================
+(begin-tx)
+(expect-failure "PAY-1 a winner listed twice fails on the second claim"
+  "this board has already been claimed"
+  (pay.claim-all 1 [1 2 1]))
+(rollback-tx)
+(begin-tx)
+(expect "PAY-1a the aborted batch left nothing behind: the round still owes 7658.16" 7658.16
+  (at 'liability (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)))
+(expect "PAY-1a1 and player-1 was not paid: 100 - 0.25" 99.75
+  (coin.get-balance "player-1"))
+(commit-tx)
+
+;; ============================================================================
+;; PAY-1b  A BATCH MIXING WINNERS AND LOSERS SUCCEEDS AND SETTLES EVERY ONE
+;;   The slots difference from baccarat: a loser's claim does not abort, it
+;;   settles the board and releases its reserve. player-24 (tumble 4 x 0.1) loses
+;;   (0 units); player-1 (classic), player-3 (big) and player-5 (free-spins) win
+;;   (Python oracle). Five of the forty-one lose: players 2, 22, 24, 25 and 31.
+;;   The batch is rolled back afterwards ONLY so PAY-2 can settle all forty-one
+;;   in one transaction; it succeeded before the rollback.
+;; ============================================================================
+;; A winning claim returns its payout floored at twelve places, and Pact prints such
+;; a decimal with all twelve ("paid 0.900000000000"); a void refund is not floored
+;; and prints as it is ("paid 2.0").
+(begin-tx)
+(expect "PAY-1b a batch of three winners and a loser succeeds, each with its own answer"
+  ["paid 0.500000000000" "paid 0.400000000000"
+   "paid 2.000000000000" "settled: nothing to claim, this board did not win"]
+  (pay.claim-all 1 [1 3 5 24]))
+(expect "PAY-1b1 every board in it reads claimed, the loser included" [true true true true]
+  (map (lambda (i:integer) (at 'claimed (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 (pay.acct i)))) [1 3 5 24]))
+(expect "PAY-1b2 the round counts four settled" 4
+  (at 'settled (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)))
+;; each board releases ITS reserve: player-1 40 x 0.25; player-3 250 x 0.3; player-5
+;; 100 x 2.5; player-24 112.6 x 0.4 -- 380.04 in all (Python Fraction)
+(expect "PAY-1b3 liability fell by each board's own reserve, the loser's included" 7278.12
+  (at 'liability (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)))
+(expect "PAY-1b4 the winners were paid, the loser only lost its stake" [100.25 100.1 99.5 99.6]
+  (pay.balances [1 3 5 24]))
+(rollback-tx)
+
+;; ============================================================================
+;; PAY-2  FORTY-ONE BOARDS SETTLED IN ONE TRANSACTION, EACH AT THE ORACLE'S PAYOUT
+;;   The bound is the transaction limit itself, 150,000: the batch has to fit.
+;;   EXPECTED VALUES: the second independent oracle (not published; its `board`
+;;   function) under the round-1 seed for
+;;   account "player-i" and the board of `pay.entries-of i`: payout = floor(stake x
+;;   units / div, 12), balance = 100 - board total + payout. Five losers: players 2,
+;;   22, 24, 25 and 31. Total paid 99.09.
+;; ============================================================================
+(env-gasmodel "table") (env-gaslimit 150000)
+(begin-tx)
+(expect "PAY-2 PRECONDITION nothing has been settled yet" 0
+  (at 'settled (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)))
+(env-gas 0)
+(pay.claim-all 1 (enumerate 1 41))
+(print (format "GAS 41 claims (one machine each, 430 spins) to 41 accounts in one transaction: {}" [(env-gas)]))
+(expect "PAY-2a forty-one claims in one transaction fit inside the 150,000 transaction limit" true
+  (< (env-gas) 150000))
+;; the batch is measured; the checks below scan every board row and are not part of it
+(env-gaslimit 100000000)
+;; COVER THE SET: every one of the forty-one, not a sample
+(expect "PAY-2b every account holds exactly the oracle's balance"
+  [100.25 99.0 100.1 100.5 99.5 99.68 100.75 100.0 99.5 99.0 99.0 100.22 99.0 100.0 100.1 99.0 102.5 99.62 98.75 99.0
+   100.3 99.5 100.0 99.6 98.75 100.0 100.1 100.0 96.5 99.28 97.25 100.0 99.1 99.0 96.5 98.54 98.5 101.0 98.9 99.75 100.5]
+  (pay.balances (enumerate 1 41)))
+(expect "PAY-2c every board recorded the oracle's payout"
+  [0.5 0.0 0.4 1.5 2.0 0.28 2.5 4.0 0.4 1.5 4.5 1.42 2.25 7.0 1.6 3.0 11.0 1.42 3.5 9.0
+   0.4 0.0 1.5 0.0 0.0 3.0 0.8 2.0 1.0 0.28 0.0 6.0 0.4 2.5 4.0 0.14 2.75 10.0 0.8 4.75 1.0]
+  (map (lambda (i:integer) (at 'payout (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 (pay.acct i)))) (enumerate 1 41)))
+(expect "PAY-2d every board reads claimed, the loser included" 41
+  (length (filter (lambda (b:object{n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.board}) (at 'claimed b))
+                  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.round-boards 1))))
+(expect "PAY-2e every board recorded three stops per spin of every entry" true
+  (= [] (filter (lambda (b:object{n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.board})
+                  (!= (length (at 'stops b)) (* 3 (pay.spins-in (at 'entries b)))))
+                (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.round-boards 1))))
+(let ((r (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)))
+  (expect "PAY-2f the round counts all forty-one settled" 41 (at 'settled r))
+  (expect "PAY-2g the round owes exactly nothing" 0.0 (at 'liability r)))
+(expect "PAY-2h and the pot's reserve is back to EXACTLY zero" 0.0
+  (at 'reserved (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params)))
+;; one board stop for stop: player-3's big 3 x 0.1, 4 units (oracle)
+(expect "PAY-2i player-3's board recorded the oracle's 9 stops"
+  [51 50 16 22 4 15 9 63 16]
+  (at 'stops (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 "player-3")))
+(commit-tx)
+(env-gaslimit 150000) (env-gas 0)
+
+;; ============================================================================
+;; PAY-3  A CLAIM ON AN ALREADY-SETTLED BOARD ABORTS THE WHOLE BATCH
+;;   Round 2 (beacon 20802058) holds two fresh boards; a batch that settles one of
+;;   them and then names a round-1 board PAY-2 already settled aborts, and the
+;;   fresh board it settled first is not settled either.
+;; ============================================================================
+(env-chain-data { "block-time": (time "2026-09-20T17:58:16Z") })
+(begin-tx)
+(pay.place-board 1 0 0.25 1)
+(pay.place-board 2 0 0.5 2)
+(expect "PAY-3 PRECONDITION round 2 pins beacon 20802058" 20802058
+  (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 2)))
+(commit-tx)
+(env-sigs [])
+(env-chain-data { "block-time": (time "2026-09-20T18:01:00Z") })
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.resolve 2 "19d1a6c9bf554b87d004b73acccad64cc0b4370735b609369f92a9a53e8a07870651464a0b393ef8c607ff05eab5dd7b870ff5dfafda7140e0e2ed10387d3160")
+(commit-tx)
+(begin-tx)
+(expect-failure "PAY-3 a fresh round-2 claim, then a settled round-1 board: the batch fails"
+  "this board has already been claimed"
+  [(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 2 "player-1")
+   (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 1 "player-5")])
+(rollback-tx)
+(begin-tx)
+(expect "PAY-3a the round-2 board the batch touched first is still unsettled" false
+  (at 'claimed (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 2 "player-1")))
+(expect "PAY-3b and round 2 still owes both boards' reserve: 40 x (0.25 + 1.0)" 50.0
+  (at 'liability (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 2)))
+(expect "PAY-3c CONTROL the same round-2 claims alone, as a set, succeed and clear the round" 0.0
+  (let ((x (pay.claim-gas 2 ["player-1" "player-2"])))
+    (print (format "GAS per claim, classic boards of 1 and 2 spins (the claim's fixed part): {}" [x]))
+    (at 'liability (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 2))))
+(expect "PAY-3d and the pot's reserve is zero again" 0.0
+  (at 'reserved (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params)))
+(commit-tx)
+
+;; the gas meter restarts: PAY-4's setup is not part of any measured batch
+(env-gaslimit 100000000) (env-gas 0)
+;; ============================================================================
+;; PAY-4  THE HEAVIEST CLAIMS: TEN 20-SPIN FREE-SPINS BOARDS IN ONE TRANSACTION
+;;   A free-spins spin that triggers plays 8 more spins, up to 24 with
+;;   retriggers, each one more hash. Which boards trigger is the beacon's choice,
+;;   so the ten accounts below were HUNTED off-chain: under round 3's seed (the
+;;   verifier's seed for "slots|3" at beacon 20802172), the Python oracle scored
+;;   the 20-spin free-spins board of accounts "fs-0" .. "fs-19999" by the free
+;;   spins it plays, and these are the ten heaviest (32, then nine of 24: two or
+;;   three triggers each, retriggers included). Each claim's gas is printed; the
+;;   crank sizes its batches from these figures.
+;;   EXPECTED payouts: the Python oracle, stake 0.1 x units.
+;; ============================================================================
+(begin-tx)
+(module fsx FG (defcap FG () (enforce true "ok"))
+  (defconst FS:[string] ["fs-3893" "fs-8517" "fs-2892" "fs-14148" "fs-9979"
+                         "fs-8304" "fs-8129" "fs-4539" "fs-3505" "fs-2559"]))
+(commit-tx)
+(begin-tx)
+(test-capability (coin.COINBASE))
+(map (lambda (a:string) (coin.coinbase a (read-keyset "pk") 100.0)) fsx.FS)
+(commit-tx)
+(env-chain-data { "block-time": (time "2026-09-20T18:03:58Z") })
+(begin-tx)
+(map (lambda (a:string) (pay.place-as a [{ "machine": 4, "stake": 0.1, "spins": 20 }])) fsx.FS)
+(expect "PAY-4 PRECONDITION round 3 pins beacon 20802172" 20802172
+  (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 3)))
+(expect "PAY-4a PRECONDITION ten free-spins boards of 20 spins sit in round 3" [10 [4 4 4 4 4 4 4 4 4 4]]
+  [(length (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.round-boards 3))
+   (map (lambda (a:string) (at 'machine (at 0 (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 3 a))))) fsx.FS)])
+(expect "PAY-4b PRECONDITION exposure is 100 x 2.0 per board" 2000.0
+  (at 'exposure (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 3)))
+(commit-tx)
+(env-sigs [])
+(env-chain-data { "block-time": (time "2026-09-20T18:07:00Z") })
+(begin-tx)
+(expect "PAY-4c round 3 resolves to the verifier's seed for slots|3 at 20802172"
+  113681738990307287115793372276389237259787656144056506217434544693132924927252
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.resolve 3 "1f5b04f99e8ed51bbe06ffd960a7e6e421465bd5e0e873aade49e236a3131f06000addb82c5de70f69d0305dbb2a99d88da2d527bdd7ce9fd307263727445361"))
+(commit-tx)
+(env-gaslimit 150000) (env-gas 0)
+(begin-tx)
+(env-gas 0)
+(let ((each (pay.claim-gas 3 fsx.FS)))
+  (print (format "GAS per claim, ten heaviest 20-spin free-spins boards found: {}" [each]))
+  (print (format "GAS the ten claims in one transaction: {}" [(env-gas)]))
+  (expect "PAY-4d ten of the heaviest claims fit inside the 150,000 transaction limit" true
+    (< (env-gas) 150000)))
+(expect "PAY-4e every board recorded the oracle's payout"
+  [7.1 6.9 5.4 6.7 6.3 6.1 4.5 5.0 6.2 4.2]
+  (map (lambda (a:string) (at 'payout (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 3 a))) fsx.FS))
+(expect "PAY-4f and each account holds 100 - 2.0 + its payout"
+  [105.1 104.9 103.4 104.7 104.3 104.1 102.5 103.0 104.2 102.2]
+  (map (coin.get-balance) fsx.FS))
+(expect "PAY-4g a free-spins board records the stops of its PAID spins only: 60 per board" [60 60]
+  [(length (at 'stops (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 3 "fs-3893")))
+   (length (at 'stops (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 3 "fs-2559")))])
+(expect "PAY-4h the round owes nothing" 0.0
+  (at 'liability (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 3)))
+(expect "PAY-4i and the pot's reserve is back to EXACTLY zero" 0.0
+  (at 'reserved (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params)))
+(commit-tx)
+;; The bound no real board reaches: twenty paid spins that EACH play the full 24
+;; free spins. No seed and account is known that does this, so it is measured on
+;; the spin evaluator directly, with "worst|15146" -- a key that triggers and plays
+;; all 24 free spins (the oracle counts 24; the key "hunt|1339" plays only 8) --
+;; evaluated twenty times.
+;; A claim costs this plus its fixed part (reads, writes, the transfer, events).
+(begin-tx)
+(env-gas 0)
+(expect "PAY-4j CONTROL the bound's key plays all 24 free spins and returns 34 units (oracle)" 34
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.spin-units 4 "worst|15146"))
+(env-gas 0)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.spin-units 4 "worst|15146")
+(print (format "GAS one free-spins spin playing all 24 free spins: {}" [(env-gas)]))
+(env-gas 0)
+(map (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.spin-units 4) (make-list 20 "worst|15146"))
+(print (format "GAS twenty such spins, the evaluator's bound for one 20-spin board: {}" [(env-gas)]))
+(rollback-tx)
+;; ============================================================================
+;; PAY-5  THE GAS BOUND OF A MAX-SPINS BOARD, ON EVERY MACHINE
+;;   A board plays one machine and every spin is settled in its one claim, so MAX-SPINS
+;;   bounds the claim's gas, and a board that cannot be settled inside the 150,000
+;;   transaction limit would lock its reserve forever. The bound is set so the heaviest
+;;   claim this suite can BUILD on any machine stays at or under 110,000 here (the node
+;;   measured within 0.3 % of the REPL for the same evaluation).
+;;   This is a measured bound on sampled keys, not a proof of the worst case: an analytic
+;;   upper bound from the heaviest per-spin cost of every machine (an independent review
+;;   computed it) is 114,598 on free-spins and 36,520 on tumble — both under the
+;;   crank's 125,000 allowance and 35,000 under the chain's limit.
+;;   No seed and account make every spin of a board play its heaviest outcome, so the
+;;   bound is built the way the node measurement built it: a REAL board of MAX-SPINS spins on
+;;   each machine (real-length k: accounts) is placed, resolved and claimed, its claim's
+;;   gas measured; then its evaluation is redone by hand on its own keys and on MAX-SPINS
+;;   copies of the heaviest key of a real key's length found for that machine:
+;;     bound claim = claim + (evaluation on the bound key - evaluation on its own keys)
+;;   The bound keys ("<43-character hash>|<three digits>", longer than any real spin key
+;;   of a 77-spin board) were hunted off chain with the second independent oracle:
+;;   free-spins plays all 24 free spins (the heaviest of 66 such keys in REPL gas),
+;;   tumble runs all five cascades to the 563-unit cap, and the line and wild keys are
+;;   the heaviest single spins of 400 sampled.
+;;   GB-0..GB-5 go RED if MAX-SPINS rises past what the free-spins machine can settle
+;;   (78 spins measure 110,077), GB-100 records why 100 spins cannot be offered.
+;; ============================================================================
+(begin-tx)
+(module gb GBG (defcap GBG () (enforce true "ok"))
+  (defconst ACCTS:[string]
+    [ "k:000000000000000000000000000000000000000000000000000000000abc0000"
+      "k:000000000000000000000000000000000000000000000000000000000abc0001"
+      "k:000000000000000000000000000000000000000000000000000000000abc0002"
+      "k:000000000000000000000000000000000000000000000000000000000abc0003"
+      "k:000000000000000000000000000000000000000000000000000000000abc0004"
+      "k:000000000000000000000000000000000000000000000000000000000abc0005" ])
+  (defconst KEYS:[string]
+    [ "rPGAvSlL_HAZukT1UglC3YkMQIiV5FbTYnzyCmnPJtE|102"
+      "YwFGqV46CqT2jam8dLD2Zwf7sMnYFw-cqKPYrwo9Vyw|126"
+      "sxiFNQHKQsVj7Jr7cZ-KEtJI1lgBl8gyaLw82FpEsmM|124"
+      "fJKkL1WZV2FvCHZqDH9ZH7RT9Z08KsRWWFcnOCJum3I|100"
+      "LEd2Ea0MIkWwXQqTEknrGPG3zfOQlYeqC9ac33I93f8|282"
+      "qE9eedQtUZy5exLpFSkzOCxvkqHYPuP2HoMId057U8M|635" ])
+  (defconst SEED4:integer 90347711774556224693664603648123395680570547881460123261898244657775605075768)
+  (defconst LIMIT:integer 110000)
+  ;; play-entries' evaluation of one entry, written out with the keys supplied
+  (defun hand:object (id:integer stake:decimal ks:[string])
+    (let ((units (fold (+) 0 (map (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.spin-units id) ks))))
+      { "stops": (fold (+) [] (map (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.key-stops) ks)), "units": units
+      , "payout": (floor (/ (* stake (dec units)) (dec (at 'div (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.machine-at id)))) 12) }))
+  (defun keys-of:[string] (seed:integer acct:string n:integer)
+    (map (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.spin-key (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.board-seed seed acct)) (enumerate 1 n)))
+  (defun g-hand:integer (id:integer ks:[string])
+    (let* ((g0 (env-gas)) (r (hand id 0.01 ks)) (g1 (env-gas))) (- g1 g0)))
+  (defun g-claim:integer (seq:integer acct:string)
+    (let* ((g0 (env-gas)) (r (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim seq acct)) (g1 (env-gas))) (- g1 g0)))
+  (defschema g n:integer)
+  (deftable gt:{g})
+  (defun keep:string (k:string n:integer) (write gt k { "n": n }))
+  (defun got:integer (k:string) (at 'n (read gt k)))
+  ;; the bound claim of machine m's board in round seq
+  (defun bound:integer (seq:integer m:integer)
+    (let* ((n n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.MAX-SPINS) (a (at m ACCTS))
+           (real (g-hand m (keys-of SEED4 a n)))
+           (worst (g-hand m (make-list n (at m KEYS)))))
+      (+ (got (format "claim{}" [m])) (- worst real)))))
+(create-table gb.gt)
+(commit-tx)
+(env-gaslimit 100000000) (env-gas 0)
+(env-data { "g0": { "keys": ["000000000000000000000000000000000000000000000000000000000abc0000"], "pred": "keys-all" }
+          , "g1": { "keys": ["000000000000000000000000000000000000000000000000000000000abc0001"], "pred": "keys-all" }
+          , "g2": { "keys": ["000000000000000000000000000000000000000000000000000000000abc0002"], "pred": "keys-all" }
+          , "g3": { "keys": ["000000000000000000000000000000000000000000000000000000000abc0003"], "pred": "keys-all" }
+          , "g4": { "keys": ["000000000000000000000000000000000000000000000000000000000abc0004"], "pred": "keys-all" }
+          , "g5": { "keys": ["000000000000000000000000000000000000000000000000000000000abc0005"], "pred": "keys-all" } })
+(begin-tx)
+(test-capability (coin.COINBASE))
+(map (lambda (m:integer) (coin.coinbase (at m gb.ACCTS) (read-keyset (format "g{}" [m])) 100.0)) (enumerate 0 5))
+(commit-tx)
+(env-chain-data { "block-time": (time "2026-09-20T17:58:19Z") })
+(env-sigs [{"key":"000000000000000000000000000000000000000000000000000000000abc0000","caps":[(coin.TRANSFER "k:000000000000000000000000000000000000000000000000000000000abc0000" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) (* 0.01 (dec n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.MAX-SPINS)))]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet "k:000000000000000000000000000000000000000000000000000000000abc0000" { "entries": [{ "machine": 0, "stake": 0.01, "spins": n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.MAX-SPINS }] })
+(commit-tx)
+(env-sigs [{"key":"000000000000000000000000000000000000000000000000000000000abc0001","caps":[(coin.TRANSFER "k:000000000000000000000000000000000000000000000000000000000abc0001" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) (* 0.01 (dec n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.MAX-SPINS)))]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet "k:000000000000000000000000000000000000000000000000000000000abc0001" { "entries": [{ "machine": 1, "stake": 0.01, "spins": n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.MAX-SPINS }] })
+(commit-tx)
+(env-sigs [{"key":"000000000000000000000000000000000000000000000000000000000abc0002","caps":[(coin.TRANSFER "k:000000000000000000000000000000000000000000000000000000000abc0002" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) (* 0.01 (dec n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.MAX-SPINS)))]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet "k:000000000000000000000000000000000000000000000000000000000abc0002" { "entries": [{ "machine": 2, "stake": 0.01, "spins": n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.MAX-SPINS }] })
+(commit-tx)
+(env-sigs [{"key":"000000000000000000000000000000000000000000000000000000000abc0003","caps":[(coin.TRANSFER "k:000000000000000000000000000000000000000000000000000000000abc0003" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) (* 0.01 (dec n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.MAX-SPINS)))]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet "k:000000000000000000000000000000000000000000000000000000000abc0003" { "entries": [{ "machine": 3, "stake": 0.01, "spins": n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.MAX-SPINS }] })
+(commit-tx)
+(env-sigs [{"key":"000000000000000000000000000000000000000000000000000000000abc0004","caps":[(coin.TRANSFER "k:000000000000000000000000000000000000000000000000000000000abc0004" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) (* 0.01 (dec n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.MAX-SPINS)))]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet "k:000000000000000000000000000000000000000000000000000000000abc0004" { "entries": [{ "machine": 4, "stake": 0.01, "spins": n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.MAX-SPINS }] })
+(commit-tx)
+(env-sigs [{"key":"000000000000000000000000000000000000000000000000000000000abc0005","caps":[(coin.TRANSFER "k:000000000000000000000000000000000000000000000000000000000abc0005" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) (* 0.01 (dec n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.MAX-SPINS)))]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet "k:000000000000000000000000000000000000000000000000000000000abc0005" { "entries": [{ "machine": 5, "stake": 0.01, "spins": n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.MAX-SPINS }] })
+(commit-tx)
+(begin-tx)
+(expect "PAY-5 PRECONDITION round 4 pins beacon 20802059" 20802059 (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 4)))
+(expect "PAY-5a PRECONDITION six boards sit in round 4, one per machine, each of MAX-SPINS spins"
+  [[0 1 2 3 4 5] (make-list 6 n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.MAX-SPINS)]
+  (let ((bs (map (lambda (a:string) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 4 a)) gb.ACCTS)))
+    [(map (lambda (b:object) (at 'machine (at 0 (at 'entries b)))) bs)
+     (map (lambda (b:object) (at 'spins (at 0 (at 'entries b)))) bs)]))
+(commit-tx)
+(env-sigs [])
+(env-chain-data { "block-time": (time "2026-09-20T18:01:00Z") })
+(begin-tx)
+(expect "PAY-5b round 4 resolves to the verifier's seed for slots|4 at 20802059" gb.SEED4
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.resolve 4 "090610f4d8155e4d56b23988d4f0a0451e42a3cc2c296cf4bc98f5f3bbfed1a811d2467d48083eabef7f856e0e9198166abc9a67de356bee250adf30d4a3c5c7"))
+(commit-tx)
+(env-gasmodel "table") (env-gaslimit 150000)
+(begin-tx)
+(gb.keep "claim0" (gb.g-claim 4 (at 0 gb.ACCTS)))
+(commit-tx)
+(begin-tx)
+(gb.keep "claim1" (gb.g-claim 4 (at 1 gb.ACCTS)))
+(commit-tx)
+(begin-tx)
+(gb.keep "claim2" (gb.g-claim 4 (at 2 gb.ACCTS)))
+(commit-tx)
+(begin-tx)
+(gb.keep "claim3" (gb.g-claim 4 (at 3 gb.ACCTS)))
+(commit-tx)
+(begin-tx)
+(gb.keep "claim4" (gb.g-claim 4 (at 4 gb.ACCTS)))
+(commit-tx)
+(begin-tx)
+(gb.keep "claim5" (gb.g-claim 4 (at 5 gb.ACCTS)))
+(commit-tx)
+(env-gaslimit 100000000)
+(begin-tx)
+(expect "PAY-5c CONTROL the bound keys are at the bound (oracle): line and wild 0 units, free-spins 54 units after all 24 free spins, tumble 563 after five cascades"
+  [0 0 0 0 54 563]
+  (map (lambda (m:integer) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.spin-units m (at m gb.KEYS))) (enumerate 0 5)))
+(expect "PAY-5d CONTROL the hand evaluation IS play-entries': on a real board's own keys it returns play-entries' stops, units and payout"
+  (let ((p (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.play-entries gb.SEED4 (at 4 gb.ACCTS) [{ "machine": 4, "stake": 0.01, "spins": 77 }]))) [(at 'stops p) (at 0 (at 'units p)) (at 'payout p)])
+  (let ((h (gb.hand 4 0.01 (gb.keys-of gb.SEED4 (at 4 gb.ACCTS) 77)))) [(at 'stops h) (at 'units h) (at 'payout h)]))
+(expect "PAY-5e CONTROL every board settled and the pot's reserve is back to EXACTLY zero" [6 0.0]
+  [(at 'settled (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 4)) (at 'reserved (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params))])
+(let ((b (map (gb.bound 4) (enumerate 0 5))))
+  (print (format "GAS bound claim of a MAX-SPINS board per machine [classic easy big wild free-spins tumble]: {}" [b]))
+  (expect "GB-0 classic: a MAX-SPINS board's worst claim fits 110,000" true (<= (at 0 b) gb.LIMIT))
+  (expect "GB-1 easy: a MAX-SPINS board's worst claim fits 110,000" true (<= (at 1 b) gb.LIMIT))
+  (expect "GB-2 big: a MAX-SPINS board's worst claim fits 110,000" true (<= (at 2 b) gb.LIMIT))
+  (expect "GB-3 wild: a MAX-SPINS board's worst claim fits 110,000" true (<= (at 3 b) gb.LIMIT))
+  (expect "GB-4 free-spins, the heaviest machine: a MAX-SPINS board's worst claim fits 110,000" true (<= (at 4 b) gb.LIMIT))
+  (expect "GB-5 tumble: a MAX-SPINS board's worst claim fits 110,000" true (<= (at 5 b) gb.LIMIT))
+  (expect "GB-6 and free-spins is the machine that sets the bound" (at 4 b) (fold (lambda (x:integer y:integer) (if (> y x) y x)) 0 b)))
+(let ((e100 (gb.g-hand 4 (make-list 100 (at 4 gb.KEYS)))))
+  (print (format "GAS the evaluation alone of 100 free-spins spins each playing all 24 free spins: {}" [e100]))
+  (expect "GB-100 a 100-spin free-spins board cannot be offered: its evaluation alone is over 110,000" true (> e100 gb.LIMIT)))
+(commit-tx)
+(env-gasmodel "table") (env-gaslimit 10000000)
+
+(print "slots payout suite complete: a round's boards are settled in one transaction")

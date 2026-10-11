@@ -1,0 +1,80 @@
+;; slots-test-init.repl — environment for the slots suites.
+;;
+;; The revenue account is deliberately an `m:` MODULE-GUARD principal, because
+;; that is the shape of SPT's live FUNDING-ACCOUNT on mainnet. A `c:` capability-
+;; guard principal is a different guard class and a different string, and a suite
+;; green against it would be green against an account shape that does not exist.
+
+(begin-tx)
+(module test-ns GOVERNANCE
+  (defcap GOVERNANCE () (enforce false "test fixture - not upgradeable"))
+  (defconst NS-GUARD (create-user-guard (succeed)))
+  (defun succeed () true))
+;; 🔴 THE PRODUCTION NAMESPACE. Both modules live in SPT's principal namespace,
+;; whose user AND admin guards are the 2-of-3 spt-gov keyset -- so no one else can
+;; ever define a module under these names. `free` is open to anyone and carries no
+;; such guarantee; it stays defined here only so unrelated fixtures still load.
+(define-namespace "n_48867b242317a0216a67f8c7ca26696b5878e0e3" test-ns.NS-GUARD test-ns.NS-GUARD)
+(define-namespace "smartpacts" test-ns.NS-GUARD test-ns.NS-GUARD)
+(define-namespace "free"       test-ns.NS-GUARD test-ns.NS-GUARD)
+(commit-tx)
+
+;; ---- coin stack (root namespace) --------------------------------------------
+(begin-tx)
+(load "../vendor/fixtures/fungible-v2.pact")
+(load "../vendor/fixtures/fungible-xchain-v1.pact")
+(load "../vendor/fixtures/coin.pact")
+(create-table coin.coin-table)
+(create-table coin.allocation-table)
+(commit-tx)
+
+;; ---- the drand verifier ------------------------------------------------------
+(begin-tx)
+(load "../modules/drand.pact")
+(commit-tx)
+
+;; ---- the admin keyset: SPT's spt-gov ---------------------------------------
+;; On mainnet it is keys-2 over three keys held on separate hardware wallets, and
+;; it already exists on every chain. Here one test key stands in for it.
+(env-data
+  { "gov-admin": { "keys": ["476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef"], "pred": "keys-all" } })
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(namespace "n_48867b242317a0216a67f8c7ca26696b5878e0e3")
+(define-keyset "n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-gov" (read-keyset "gov-admin"))
+(commit-tx)
+
+;; ---- a stand-in for SPT's funding account: an `m:` module-guard principal ----
+(begin-tx)
+(namespace "n_48867b242317a0216a67f8c7ca26696b5878e0e3")
+(module spt-stub GOV
+  (defcap GOV () (enforce false "stub - sealed"))
+  ;; same shape as SPT.pact:632-642 — the guard must be built inside a defun
+  (defun funding-guard:guard () (create-module-guard "SPT-funding"))
+  (defconst FUNDING-G:guard (funding-guard))
+  (defconst FUNDING-ACCOUNT:string (create-principal FUNDING-G)))
+(commit-tx)
+
+;; ---- funded players ----------------------------------------------------------
+(env-data
+  { "a-ks": { "keys": ["a11ce00000000000000000000000000000000000000000000000000000000001"], "pred": "keys-all" }
+  , "b-ks": { "keys": ["b0b0000000000000000000000000000000000000000000000000000000000002"], "pred": "keys-all" }
+  , "c-ks": { "keys": ["ca40100000000000000000000000000000000000000000000000000000000003"], "pred": "keys-all" }
+  , "h-ks": { "keys": ["h0u5e00000000000000000000000000000000000000000000000000000000004"], "pred": "keys-all" } })
+(begin-tx)
+(test-capability (coin.COINBASE))
+(coin.coinbase "k:a11ce00000000000000000000000000000000000000000000000000000000001" (read-keyset "a-ks") 100000.0)
+(coin.coinbase "k:b0b0000000000000000000000000000000000000000000000000000000000002" (read-keyset "b-ks") 100000.0)
+(coin.coinbase "k:ca40100000000000000000000000000000000000000000000000000000000003" (read-keyset "c-ks") 100000.0)
+(coin.coinbase "house-funder" (read-keyset "h-ks") 1000000.0)
+;; the revenue account must EXIST before initialize will accept it
+(coin.create-account n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-G)
+(commit-tx)
+
+;; ---- the module under test ---------------------------------------------------
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(load "../modules/slots.pact")
+(commit-tx)
+(env-sigs [])
+(print "slots test environment ready")

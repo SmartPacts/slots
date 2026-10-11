@@ -1,0 +1,579 @@
+;; slots-oracle-testing.repl — a DIFFERENTIAL accounting oracle, and the board ledger's invariants.
+;;
+;; Every other suite checks scenarios: do these inputs produce that output. This
+;; one checks INVARIANTS, by recomputing the module's own bookkeeping a second
+;; way and requiring the two to agree after every single mutating call.
+;;
+;;   reserved  ==  sum over rounds of (open -> reserve, else -> liability)
+;;   pot       >=  reserved
+;;
+;; The recompute never reads `reserved`; it walks the round rows. So a bug that
+;; updates the aggregate wrongly shows up here even when every scenario test
+;; still passes -- which is exactly the failure a scenario suite cannot see.
+;;
+;; Slots adds a second ledger: the BOARDS of a settled round. A round's liability
+;; is what its unsettled boards may still take, so it is recomputed from the
+;; board rows themselves (`round-boards`), never from the round row:
+;;   SL-1  settled <= boards, and settled is exactly the boards marked claimed
+;;   SL-2  liability == sum over the UNSETTLED boards of the sum over the board's
+;;         ENTRIES of MAX-MULT[entry's machine] x stake x spins (resolved),
+;;         recomputed from each board's own entries with the multipliers as
+;;         literals, or 1 x the stakes of those entries (void: a refund owes the
+;;         stake)
+;;   SL-3  liability == 0 exactly when settled == boards
+;; `oracle.check` applies SL-1..SL-3 to every settled round on every call, and
+;; each settlement below also names them explicitly.
+;;
+;; THE CLOCK. Four resolved rounds need four distinct genuine beacons, and a
+;; round opened at T pins round-at(T + bet-window + drand-margin), so T =
+;; time-of-round(r) - window - margin, and the next round may only open after
+;; this one's close. The wait can never go below 120 s, so two rounds pin
+;; beacons three seconds apart only when the EARLIER one opened under a LONGER
+;; wait: round 1 pins 20801767 under 30 + 180 and round 2 pins 20801768 under the
+;; launch 30 + 120; 20802058 and 20802059 likewise under 30 + 210 and then
+;; 30 + 150. Round 5 pins 20802172 under the launch dials and is voided. Every dial change is an admin `set-params`,
+;; checked by the oracle like any other mutating call.
+;;
+;; THE MACHINES. A board is a list of exactly one entry: a board plays one machine.
+;; The file plays all six machines:
+;;   round 1  alice free-spins 20 x 0.1 | bob tumble 7 x 0.2 | carol classic 1 x 1.0
+;;   round 2  alice big 1 x 1.0 | bob tumble 20 x 0.1 | carol wild 7 x 0.2
+;;   round 3  alice easy 20 x 0.1 | bob free-spins 7 x 0.2 | carol big 1 x 1.0
+;;   round 4  alice wild 1 x 1.0 | bob classic 7 x 0.2 | carol free-spins 20 x 0.1
+;;   round 5  alice tumble 20 x 0.1 | bob easy 7 x 0.2 | carol big 1 x 1.0 (voided)
+;; The pot is 60,000 against a 100,000 target, so a round's cap (about 1,200)
+;; holds the big machine's 250x.
+;;
+;; Every payout below was produced by an independent Python oracle from the seeds
+;; the verifier returns, and embedded as a literal: the one-entry boards' by the
+;; oracle that produced them first (oracle.py, not published: BLAKE2b-256 ->
+;; base64url -> big-endian integer, three 6-bit stops; line machines scored by the
+;; model's common.pay3, wild by e_wild.mkpay 'double', tumble by
+;; f_cascade.simulate, free spins by a per-key walk of d_free's bonus recursion; it
+;; reproduces all 2,544 units of the parity harness diff/py.json), and every board
+;; of this file again by a second independent oracle, also not published. The two
+;; agree.
+;;
+;; A winning claim returns its payout floored at twelve places, and Pact prints such
+;; a decimal with all twelve ("paid 0.900000000000"); a void refund is not floored
+;; and prints as it is ("paid 2.0").
+
+(load "slots-test-init.repl")
+
+(begin-tx)
+(module oracle GG (defcap GG () (enforce true "ok"))
+  ;; A round's live obligation on the pot. `try 0.0` so a seq that was never
+  ;; opened folds harmlessly, letting us sweep a range.
+  (defun round-oblig:decimal (seq:integer)
+    (try 0.0
+      (let* ((r (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round seq)) (st (at 'state r)))
+        (if (= st "open") (at 'reserve r) (at 'liability r)))))
+  (defun true-reserved:decimal (hi:integer)
+    (fold (+) 0.0 (map (round-oblig) (enumerate 1 hi))))
+  (defun contract-reserved:decimal () (at 'reserved (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params)))
+  (defun pot:decimal () (coin.get-balance (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account)))
+  ;; ---- the board ledger, recomputed from the board rows -------------------
+  ;; Every table read is BOUND before any `enforce`: Pact 5 evaluates an
+  ;; enforce's condition in read-only mode, where `select` is refused.
+  ;; a board's stake and worst case, recomputed from its OWN ENTRIES -- never from the
+  ;; row's `total` or `reserve`, which the contract wrote
+  (defun entry-total:decimal (e:object) (* (at 'stake e) (dec (at 'spins e))))
+  (defun board-total:decimal (b:object) (fold (+) 0.0 (map (entry-total) (at 'entries b))))
+  (defun unsettled-total:decimal (bs:[object])
+    (fold (+) 0.0 (map (lambda (b:object) (if (at 'claimed b) 0.0 (board-total b))) bs)))
+  (defun claimed-count:integer (bs:[object])
+    (length (filter (lambda (b:object) (at 'claimed b)) bs)))
+  ;; each machine's maximum per unit staked, as LITERALS (classic 40,
+  ;; easy 18, big 250, wild 40, free-spins 100, tumble 563/5), never read from
+  ;; the module whose reserve they check
+  (defconst MAXMULT:[decimal] [40.0 18.0 250.0 40.0 100.0 112.6])
+  ;; what an unsettled board may still take of a RESOLVED round: the sum over its
+  ;; entries of that entry's machine maximum times the entry's stake x spins
+  (defun board-worst:decimal (b:object)
+    (fold (+) 0.0 (map (lambda (e:object) (* (at (at 'machine e) MAXMULT) (entry-total e))) (at 'entries b))))
+  (defun unsettled-worst:decimal (bs:[object])
+    (fold (+) 0.0 (map (lambda (b:object) (if (at 'claimed b) 0.0 (board-worst b))) bs)))
+  (defun want-liability:decimal (st:string bs:[object])
+    (if (= st "resolved") (unsettled-worst bs) (unsettled-total bs)))
+  (defun sl:string (seq:integer label:string)
+    (let* ((r (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round seq))
+           (bs (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.round-boards seq))
+           (st (at 'state r))
+           (nb (at 'boards r)) (ns (at 'settled r)) (liab (at 'liability r))
+           (nrows (length bs)) (nclaimed (claimed-count bs)) (want (want-liability st bs)))
+      (enforce (!= "open" st) (format "{}: round {} is not settled" [label seq]))
+      (enforce (= nb nrows) (format "{}: SL-1 board count DIVERGES in round {}" [label seq]))
+      (enforce (<= ns nb) (format "{}: SL-1 settled {} > boards {} in round {}" [label ns nb seq]))
+      (enforce (= ns nclaimed) (format "{}: SL-1 settled {} != claimed boards in round {}" [label ns seq]))
+      (enforce (= liab want)
+        (format "{}: SL-2 liability DIVERGES in round {}: contract={} boards={}" [label seq liab want]))
+      (enforce (= (= liab 0.0) (= ns nb)) (format "{}: SL-3 liability {} with {}/{} settled in round {}" [label liab ns nb seq]))
+      (format "{} ok" [label])))
+  (defun sl-sweep:bool (hi:integer label:string)
+    (fold (lambda (ok:bool s:integer)
+            (let ((st (try "open" (at 'state (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round s)))))
+              (if (= "open" st) ok
+                  (let ((one (sl s label))) (and ok (= one (format "{} ok" [label])))))))
+          true (enumerate 1 hi)))
+  (defun check:string (hi:integer label:string)
+    (let ((tr (true-reserved hi)) (cr (contract-reserved)) (p (pot)) (ledger (sl-sweep hi label)))
+      (enforce (= tr cr) (format "{}: reserved DIVERGES contract={} oracle={}" [label cr tr]))
+      (enforce (>= p cr) (format "{}: INSOLVENT pot={} < reserved={}" [label p cr]))
+      (enforce ledger (format "{}: board ledger" [label]))
+      (format "{} ok" [label])))
+)
+(commit-tx)
+
+(begin-tx)
+(module oprobe OG (defcap OG () (enforce true "ok"))
+  (defconst ALICE "k:a11ce00000000000000000000000000000000000000000000000000000000001")
+  (defconst BOB   "k:b0b0000000000000000000000000000000000000000000000000000000000002")
+  (defconst CAROL "k:ca40100000000000000000000000000000000000000000000000000000000003")
+  ;; genuine drand signatures, one per pinned round
+  (defconst SIG1 "0d745db068db9e16379a49f65d76353d721d79fb459d20b33a50e750e5cdb10400af36e03d4a8414b3a86770d1d1e90e85462dce40b3cf5c27f9fdb477b6f6e0") ; 20801767
+  (defconst SIG2 "3046d0014da5e70c6a4c99fc5fafde0cc68ae79d82ece3177dc7d6147945cfb502d3ce355c42c98368f003bf089aebb110ee7119f62d6402a2187d58f44f297a") ; 20801768
+  (defconst SIG3 "19d1a6c9bf554b87d004b73acccad64cc0b4370735b609369f92a9a53e8a07870651464a0b393ef8c607ff05eab5dd7b870ff5dfafda7140e0e2ed10387d3160") ; 20802058
+  (defconst SIG4 "090610f4d8155e4d56b23988d4f0a0451e42a3cc2c296cf4bc98f5f3bbfed1a811d2467d48083eabef7f856e0e9198166abc9a67de356bee250adf30d4a3c5c7") ; 20802059
+  (defconst SIG5 "1f5b04f99e8ed51bbe06ffd960a7e6e421465bd5e0e873aade49e236a3131f06000addb82c5de70f69d0305dbb2a99d88da2d527bdd7ce9fd307263727445361") ; 20802172
+)
+(commit-tx)
+
+
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.initialize n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT 100000.0)
+(expect "O-1 after initialize" "after initialize ok" (oracle.check 0 "after initialize"))
+;; THE NEGATIVE CONTROL. A check that compares the contract with itself passes
+;; however broken the accounting is. It is here to show that the RECOMPUTE is the
+;; load-bearing half, not the comparison.
+(expect "O-1a CONTROL a self-comparison is vacuous and always passes" true
+  (= (oracle.contract-reserved) (oracle.contract-reserved)))
+(commit-tx)
+(env-sigs [{"key":"h0u5e00000000000000000000000000000000000000000000000000000000004"
+           ,"caps":[(coin.TRANSFER "house-funder" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 60000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.fund-house "house-funder" 60000.0)
+(expect "O-2 after funding" "after funding ok" (oracle.check 0 "after funding"))
+(commit-tx)
+(env-sigs [])
+
+;; the dials for round 1: a 30 s window and a 180 s margin
+(env-chain-data { "block-time": (time "2026-09-20T17:42:00Z") })
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.set-params 0.02 0.01 100000.0 30.0 180.0)
+(expect "O-2a after the dials move for round 1" "after set-params 0 ok" (oracle.check 0 "after set-params 0"))
+(commit-tx)
+(env-sigs [])
+
+;; ---- round 1: beacon 20801767 under 30 s + 180 s ------------------------------
+;; a board of 20 free-spins spins, a 7-spin tumble board and a one-spin classic board
+(env-chain-data { "block-time": (time "2026-09-20T17:42:43Z") })
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER oprobe.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 1000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet oprobe.ALICE { "entries": [{ "machine": 4, "stake": 0.1, "spins": 20 }] })
+(expect "O-3 after a 20-spin board opens round 1" "after bet 1a ok" (oracle.check 1 "after bet 1a"))
+(expect "O-3a round 1 pins the beacon we hold a signature for" 20801767
+  (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)))
+(commit-tx)
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER oprobe.BOB (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 1000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet oprobe.BOB { "entries": [{ "machine": 5, "stake": 0.2, "spins": 7 }] })
+(expect "O-4 after a tumble board joins the same round" "after bet 1b ok" (oracle.check 1 "after bet 1b"))
+(commit-tx)
+(env-sigs [{"key":"ca40100000000000000000000000000000000000000000000000000000000003"
+           ,"caps":[(coin.TRANSFER oprobe.CAROL (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 1000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet oprobe.CAROL { "entries": [{ "machine": 0, "stake": 1.0, "spins": 1 }] })
+(expect "O-4a after a 1-spin board joins it too" "after bet 1c ok" (oracle.check 1 "after bet 1c"))
+(expect "O-4m round 1's boards hold one machine each" [[4] [5] [0]]
+  (map (lambda (a:string) (map (lambda (e:object) (at 'machine e)) (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 1 a)))) [oprobe.ALICE oprobe.BOB oprobe.CAROL]))
+;; VALUE TEST, recomputed independently in Python (Fraction, eo.Table): exposure
+;; 100 x 2.0 + 112.6 x 1.4 + 40 x 1.0 = 397.64, plus the fees, each board's
+;; floor(scale x edge[machine] x total, 12) at the scale its bet saw
+(expect "O-4b the round's reserve, to the last digit" 397.740024815881
+  (at 'reserve (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)))
+(expect "O-4c of which the exposure is the sum over boards of machine maximum x board total" 397.64
+  (at 'exposure (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)))
+(commit-tx)
+(env-sigs [])
+
+;; the dials for round 2: the launch 30 s window and 120 s margin
+(env-chain-data { "block-time": (time "2026-09-20T17:43:20Z") })
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.set-params 0.02 0.01 100000.0 30.0 120.0)
+(expect "O-4d after the dials move" "after set-params 1 ok" (oracle.check 1 "after set-params 1"))
+(commit-tx)
+(env-sigs [])
+
+;; ---- round 2: beacon 20801768, opened while round 1 is still unsettled -------
+(env-chain-data { "block-time": (time "2026-09-20T17:43:46Z") })
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER oprobe.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 1000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet oprobe.ALICE { "entries": [{ "machine": 2, "stake": 1.0, "spins": 1 }] })
+(expect "O-5 with two rounds open at once" "two rounds open ok" (oracle.check 2 "two rounds open"))
+(expect "O-5a round 2 pins the next beacon" 20801768 (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 2)))
+(expect "O-5b round 1 is still unsettled" "open" (at 'state (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)))
+(commit-tx)
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER oprobe.BOB (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 1000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet oprobe.BOB { "entries": [{ "machine": 5, "stake": 0.1, "spins": 20 }] })
+(expect "O-5c after bet 2b" "after bet 2b ok" (oracle.check 2 "after bet 2b"))
+(commit-tx)
+(env-sigs [{"key":"ca40100000000000000000000000000000000000000000000000000000000003"
+           ,"caps":[(coin.TRANSFER oprobe.CAROL (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 1000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet oprobe.CAROL { "entries": [{ "machine": 3, "stake": 0.2, "spins": 7 }] })
+(expect "O-5d after bet 2c" "after bet 2c ok" (oracle.check 2 "after bet 2c"))
+(expect "O-5m round 2's boards hold one machine each" [[2] [5] [3]]
+  (map (lambda (a:string) (map (lambda (e:object) (at 'machine e)) (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 2 a)))) [oprobe.ALICE oprobe.BOB oprobe.CAROL]))
+(commit-tx)
+(env-sigs [])
+
+;; the dials for round 3: a 30 s window, a 210 s margin
+(env-chain-data { "block-time": (time "2026-09-20T17:44:50Z") })
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.set-params 0.02 0.01 100000.0 30.0 210.0)
+(expect "O-5e after the dials move again" "after set-params 2 ok" (oracle.check 2 "after set-params 2"))
+(commit-tx)
+(env-sigs [])
+
+;; ---- resolve round 1 and settle every board ------------------------------------
+(env-chain-data { "block-time": (time "2026-09-20T17:46:30Z") })
+(begin-tx)
+(expect "O-6 resolve 1 returns round 1's seed (measured)"
+  41473200179623307258957694415769443739304335489542769187234381733079227613887
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.resolve 1 oprobe.SIG1))
+(expect "O-6a after resolve releases the fee" "after resolve 1 ok" (oracle.check 2 "after resolve 1"))
+(expect "SL-2a a resolved round with nothing settled owes every board's machine maximum x its total" 397.64
+  (at 'liability (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)))
+(commit-tx)
+(begin-tx)
+(expect "O-7 alice's 20 free-spins spins win 9 units at 0.1" "paid 0.900000000000" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 1 oprobe.ALICE))
+(expect "O-7a after claim 1a" "after claim 1a ok" (oracle.check 2 "after claim 1a"))
+(expect "SL-1a one of three settled" "SL 1a ok" (oracle.sl 1 "SL 1a"))
+(commit-tx)
+(begin-tx)
+(expect "O-7b bob's tumble wins 7 line units at 0.2 / 5" "paid 0.280000000000" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 1 oprobe.BOB))
+(expect "O-7c after claim 1b" "after claim 1b ok" (oracle.check 2 "after claim 1b"))
+(expect "SL-1b two of three settled" "SL 1b ok" (oracle.sl 1 "SL 1b"))
+(expect "SL-2b liability is carol's unsettled classic board, 40 x 1.0" 40.0 (at 'liability (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)))
+(commit-tx)
+(begin-tx)
+(expect "O-7d carol's one classic spin lost, and her claim settles it"
+  "settled: nothing to claim, this board did not win" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 1 oprobe.CAROL))
+(expect "O-7e after the loser's settlement" "after claim 1c ok" (oracle.check 2 "after claim 1c"))
+(expect "SL-3a every board settled: the round owes nothing" "SL 1c ok" (oracle.sl 1 "SL 1c"))
+(expect "SL-3b liability is exactly zero" 0.0 (at 'liability (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)))
+(expect "SL-3c settled == boards == 3" [3 3]
+  [(at 'settled (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1)) (at 'boards (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 1))])
+(commit-tx)
+
+;; 🔴 drain the pot to its reserved floor: the oracle must still balance, and the
+;; remaining obligation must still be covered.
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.withdraw-house (at 'available (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status)))
+(expect "O-8 at the unreserved floor, still balanced and still solvent"
+  "at the floor ok" (oracle.check 2 "at the floor"))
+(expect "O-8a and there is genuinely nothing spare" 0.0
+  (at 'available (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status)))
+(commit-tx)
+(env-sigs [])
+
+;; ============================================================================
+;; O-8b  THE FEE IS INSIDE THE RESERVE, NOT BESIDE IT
+;;   `new-res` is max(exposure, stake) PLUS the fee accrued on the round. Drop the
+;;   fee term and every scenario suite stays green, because a pot with any slack
+;;   absorbs it. It is only visible HERE, at the unreserved floor: `resolve` pays
+;;   the fee out of the pot, and if the reserve never covered it the pot drops
+;;   BELOW what it still owes the boards of that same round. The whole probe is
+;;   rolled back, because round 2 is resolved for real below.
+;; ============================================================================
+(begin-tx)
+(expect "O-8c its reserve is the exposure PLUS the accrued fee, not the exposure alone"
+  (+ (at 'exposure (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 2)) (at 'fee-owed (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 2)))
+  (at 'reserve (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 2)))
+(expect "O-8c1 and the fee term is real: the reserve exceeds the exposure" true
+  (> (at 'reserve (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 2)) (at 'exposure (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 2))))
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.resolve 2 oprobe.SIG2)
+(expect "O-8e paying that fee at the floor leaves the pot still covering what it owes"
+  "resolved at the floor ok" (oracle.check 2 "resolved at the floor"))
+(expect "O-8f the pot sits exactly on what it owes" 0.0 (at 'available (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.pot-status)))
+(expect "O-8g bob's tumble win is payable at the floor" "paid 1.000000000000" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 2 oprobe.BOB))
+(expect "O-8h and carol's wild win" "paid 1.600000000000" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 2 oprobe.CAROL))
+(expect "O-8i and alice's big-machine loss settles" "settled: nothing to claim, this board did not win"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 2 oprobe.ALICE))
+(expect "O-8j with the books balanced afterwards"
+  "claimed at the floor ok" (oracle.check 2 "claimed at the floor"))
+(rollback-tx)
+
+;; the pot is refilled so the later rounds have a table to sit at
+(env-chain-data { "block-time": (time "2026-09-20T17:50:00Z") })
+(env-sigs [{"key":"h0u5e00000000000000000000000000000000000000000000000000000000004"
+           ,"caps":[(coin.TRANSFER "house-funder" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 60000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.fund-house "house-funder" 60000.0)
+(expect "O-8k after funding the drained pot again" "after refunding ok" (oracle.check 2 "after refunding"))
+(commit-tx)
+(env-sigs [])
+
+;; ---- resolve round 2 for real and settle every board ---------------------------
+(env-chain-data { "block-time": (time "2026-09-20T17:50:10Z") })
+(begin-tx)
+(expect "O-9 resolve 2 returns the verifier's seed for slots|2 at 20801768"
+  46631579439097871866260387162966821216809974861117406717532106310446770450219
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.resolve 2 oprobe.SIG2))
+(expect "O-9a after resolve 2" "after resolve 2 ok" (oracle.check 2 "after resolve 2"))
+(commit-tx)
+(begin-tx)
+(expect "O-10 alice's one big-machine spin lost: her claim settles it"
+  "settled: nothing to claim, this board did not win" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 2 oprobe.ALICE))
+(expect "O-10a after claim 2a" "after claim 2a ok" (oracle.check 2 "after claim 2a"))
+(expect "SL-1c one of three settled in round 2" "SL 2a ok" (oracle.sl 2 "SL 2a"))
+(commit-tx)
+(begin-tx)
+(expect "O-10b bob's tumble wins 50 line units at 0.1 / 5" "paid 1.000000000000" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 2 oprobe.BOB))
+(expect "O-10c after claim 2b" "after claim 2b ok" (oracle.check 2 "after claim 2b"))
+(expect "SL-1d two of three settled in round 2" "SL 2b ok" (oracle.sl 2 "SL 2b"))
+(commit-tx)
+(begin-tx)
+(expect "O-10d carol's wild wins 8 units at 0.2" "paid 1.600000000000" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 2 oprobe.CAROL))
+(expect "O-10e after claim 2c" "after claim 2c ok" (oracle.check 2 "after claim 2c"))
+(expect "SL-3d round 2 fully settled owes nothing" "SL 2c ok" (oracle.sl 2 "SL 2c"))
+(commit-tx)
+
+;; ---- round 3: beacon 20802058 ---------------------------------------------------
+(env-chain-data { "block-time": (time "2026-09-20T17:56:46Z") })
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER oprobe.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 1000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet oprobe.ALICE { "entries": [{ "machine": 1, "stake": 0.1, "spins": 20 }] })
+(expect "O-11 after round 3 opens" "after bet 3a ok" (oracle.check 3 "after bet 3a"))
+(expect "O-11a round 3 pins 20802058" 20802058 (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 3)))
+(commit-tx)
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER oprobe.BOB (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 1000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet oprobe.BOB { "entries": [{ "machine": 4, "stake": 0.2, "spins": 7 }] })
+(expect "O-11b after bet 3b" "after bet 3b ok" (oracle.check 3 "after bet 3b"))
+(commit-tx)
+(env-sigs [{"key":"ca40100000000000000000000000000000000000000000000000000000000003"
+           ,"caps":[(coin.TRANSFER oprobe.CAROL (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 1000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet oprobe.CAROL { "entries": [{ "machine": 2, "stake": 1.0, "spins": 1 }] })
+(expect "O-11c after bet 3c" "after bet 3c ok" (oracle.check 3 "after bet 3c"))
+(expect "O-11m round 3's boards hold one machine each" [[1] [4] [2]]
+  (map (lambda (a:string) (map (lambda (e:object) (at 'machine e)) (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 3 a)))) [oprobe.ALICE oprobe.BOB oprobe.CAROL]))
+(commit-tx)
+(env-sigs [])
+
+;; the dials for round 4: a 30 s window and a 150 s margin
+(env-chain-data { "block-time": (time "2026-09-20T17:57:30Z") })
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.set-params 0.02 0.01 100000.0 30.0 150.0)
+(expect "O-11d after the dials move" "after set-params 3 ok" (oracle.check 3 "after set-params 3"))
+(commit-tx)
+(env-sigs [])
+
+;; ---- round 4: beacon 20802059 ---------------------------------------------------
+(env-chain-data { "block-time": (time "2026-09-20T17:57:49Z") })
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER oprobe.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 1000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet oprobe.ALICE { "entries": [{ "machine": 3, "stake": 1.0, "spins": 1 }] })
+(expect "O-12 after round 4 opens" "after bet 4a ok" (oracle.check 4 "after bet 4a"))
+(expect "O-12a round 4 pins 20802059" 20802059 (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 4)))
+(commit-tx)
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER oprobe.BOB (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 1000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet oprobe.BOB { "entries": [{ "machine": 0, "stake": 0.2, "spins": 7 }] })
+(expect "O-12b after bet 4b" "after bet 4b ok" (oracle.check 4 "after bet 4b"))
+(commit-tx)
+(env-sigs [{"key":"ca40100000000000000000000000000000000000000000000000000000000003"
+           ,"caps":[(coin.TRANSFER oprobe.CAROL (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 1000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet oprobe.CAROL { "entries": [{ "machine": 4, "stake": 0.1, "spins": 20 }] })
+(expect "O-12c after bet 4c" "after bet 4c ok" (oracle.check 4 "after bet 4c"))
+(expect "O-12m round 4's boards hold one machine each" [[3] [0] [4]]
+  (map (lambda (a:string) (map (lambda (e:object) (at 'machine e)) (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 4 a)))) [oprobe.ALICE oprobe.BOB oprobe.CAROL]))
+(commit-tx)
+(env-sigs [])
+
+;; ---- resolve round 3 and settle every board --------------------------------------
+(env-chain-data { "block-time": (time "2026-09-20T18:00:50Z") })
+(begin-tx)
+(expect "O-13 resolve 3 returns the verifier's seed for slots|3 at 20802058"
+  93521103958717289785349411033381170053725632800395807109812305296915130541301
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.resolve 3 oprobe.SIG3))
+(expect "O-13a after resolve 3" "after resolve 3 ok" (oracle.check 4 "after resolve 3"))
+(commit-tx)
+(begin-tx)
+(expect "O-14 alice's 20 easy spins win 24 units at 0.1" "paid 2.400000000000" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 3 oprobe.ALICE))
+(expect "O-14a after claim 3a" "after claim 3a ok" (oracle.check 4 "after claim 3a"))
+(expect "SL-1e one of three settled in round 3" "SL 3a ok" (oracle.sl 3 "SL 3a"))
+(commit-tx)
+(begin-tx)
+(expect "O-14b bob's free-spins win 12 units at 0.2" "paid 2.400000000000" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 3 oprobe.BOB))
+(expect "O-14c after claim 3b" "after claim 3b ok" (oracle.check 4 "after claim 3b"))
+(expect "SL-1f two of three settled in round 3" "SL 3b ok" (oracle.sl 3 "SL 3b"))
+(commit-tx)
+(begin-tx)
+(expect "O-14d carol's one big-machine spin lost: her claim settles it"
+  "settled: nothing to claim, this board did not win" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 3 oprobe.CAROL))
+(expect "O-14e after claim 3c" "after claim 3c ok" (oracle.check 4 "after claim 3c"))
+(expect "SL-3e round 3 fully settled owes nothing" "SL 3c ok" (oracle.sl 3 "SL 3c"))
+(commit-tx)
+
+;; the window and margin go back to launch for round 5
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.set-params 0.02 0.01 100000.0 30.0 120.0)
+(expect "O-15 after the dials move under an open round" "after set-params 4 ok" (oracle.check 4 "after set-params 4"))
+(commit-tx)
+(env-sigs [])
+
+;; ---- resolve round 4 and settle every board --------------------------------------
+(begin-tx)
+(expect "O-16 resolve 4 returns the verifier's seed for slots|4 at 20802059"
+  90347711774556224693664603648123395680570547881460123261898244657775605075768
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.resolve 4 oprobe.SIG4))
+(expect "O-16a after resolve 4" "after resolve 4 ok" (oracle.check 4 "after resolve 4"))
+(commit-tx)
+(begin-tx)
+(expect "O-17 alice's one wild spin lost: her claim settles it"
+  "settled: nothing to claim, this board did not win" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 4 oprobe.ALICE))
+(expect "O-17a after claim 4a" "after claim 4a ok" (oracle.check 4 "after claim 4a"))
+(expect "SL-1g one of three settled in round 4" "SL 4a ok" (oracle.sl 4 "SL 4a"))
+(commit-tx)
+(begin-tx)
+(expect "O-17b bob's 7 classic spins win 7 units at 0.2" "paid 1.400000000000" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 4 oprobe.BOB))
+(expect "O-17c after claim 4b" "after claim 4b ok" (oracle.check 4 "after claim 4b"))
+(expect "SL-1h two of three settled in round 4" "SL 4b ok" (oracle.sl 4 "SL 4b"))
+(commit-tx)
+(begin-tx)
+(expect "O-17d carol's 20 free-spins spins win 10 units at 0.1" "paid 1.000000000000" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 4 oprobe.CAROL))
+(expect "O-17e after claim 4c" "after claim 4c ok" (oracle.check 4 "after claim 4c"))
+(expect "SL-3f round 4 fully settled owes nothing" "SL 4c ok" (oracle.sl 4 "SL 4c"))
+(commit-tx)
+
+;; ---- round 5: beacon 20802172, left unsettled for the refund path -----------
+(env-chain-data { "block-time": (time "2026-09-20T18:03:58Z") })
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER oprobe.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 1000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet oprobe.ALICE { "entries": [{ "machine": 5, "stake": 0.1, "spins": 20 }] })
+(expect "O-18 after round 5 opens" "after bet 5a ok" (oracle.check 5 "after bet 5a"))
+(expect "O-18a round 5 pins 20802172" 20802172 (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 5)))
+(commit-tx)
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER oprobe.BOB (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 1000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet oprobe.BOB { "entries": [{ "machine": 1, "stake": 0.2, "spins": 7 }] })
+(expect "O-18b after bet 5b" "after bet 5b ok" (oracle.check 5 "after bet 5b"))
+(commit-tx)
+(env-sigs [{"key":"ca40100000000000000000000000000000000000000000000000000000000003"
+           ,"caps":[(coin.TRANSFER oprobe.CAROL (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.house-account) 1000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.bet oprobe.CAROL { "entries": [{ "machine": 2, "stake": 1.0, "spins": 1 }] })
+(expect "O-18c after bet 5c" "after bet 5c ok" (oracle.check 5 "after bet 5c"))
+(expect "O-18m round 5's boards hold one machine each" [[5] [1] [2]]
+  (map (lambda (a:string) (map (lambda (e:object) (at 'machine e)) (at 'entries (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 5 a)))) [oprobe.ALICE oprobe.BOB oprobe.CAROL]))
+(commit-tx)
+(env-sigs [])
+
+;; the refund path, ninety days on, with nobody having proven drand alive since
+(env-chain-data { "block-time": (time "2026-12-25T00:00:00Z") })
+(begin-tx)
+(expect "O-19 PRECONDITION the record is below round 5's beacon" 20802059
+  (at 'last-beacon (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-params)))
+(expect "O-19a the round voids" "round void: every stake is refundable" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.void-round 5))
+(expect "O-19b after a round voids" "after void ok" (oracle.check 5 "after void"))
+(expect "SL-2c a void round owes 1 x every stake: 2.0 + 1.4 + 1.0" 4.4
+  (at 'liability (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 5)))
+(commit-tx)
+(begin-tx)
+(expect "O-20 alice's refund is her whole board" "paid 2.0" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 5 oprobe.ALICE))
+(expect "O-20a after refund 5a" "after refund 5a ok" (oracle.check 5 "after refund 5a"))
+(expect "SL-1i one refunded of three" "SL 5a ok" (oracle.sl 5 "SL 5a"))
+(expect "O-20b a refund records no reels" [] (at 'stops (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-board 5 oprobe.ALICE)))
+(commit-tx)
+(begin-tx)
+(expect "O-20c bob's refund is his stake" "paid 1.4" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 5 oprobe.BOB))
+(expect "O-20d after refund 5b" "after refund 5b ok" (oracle.check 5 "after refund 5b"))
+(expect "SL-2d the void round owes carol's 1.0 alone" 1.0 (at 'liability (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.get-round 5)))
+(commit-tx)
+(begin-tx)
+(expect "O-20e carol's refund" "paid 1.0" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.claim 5 oprobe.CAROL))
+(expect "O-20f after refund 5c" "after refund 5c ok" (oracle.check 5 "after refund 5c"))
+(expect "SL-3g round 5 fully refunded owes nothing" "SL 5c ok" (oracle.sl 5 "SL 5c"))
+(expect "O-20g every obligation is discharged" 0.0 (oracle.true-reserved 5))
+(expect "O-20h and the contract agrees" 0.0 (oracle.contract-reserved))
+(commit-tx)
+
+;; the record moves on after the refund; nothing is owed, nothing moves
+(begin-tx)
+(expect "O-21 prove-liveness records round 5's own beacon" 20802172
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.prove-liveness 20802172 oprobe.SIG5))
+(expect "O-21a after prove-liveness" "after liveness ok" (oracle.check 5 "after liveness"))
+(commit-tx)
+
+;; The checks are measurements, not comparisons that cannot fail. Under module
+;; admin (the pre-freeze custody A-1d measures) a row is tampered by hand, and the
+;; SAME checks that passed above fire with their own messages. Rolled back.
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(acquire-module-admin n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots)
+(update n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.rounds "1" { "liability": 40.0 })
+(expect-failure "SL-0 CONTROL a settled round still holding 40 fails SL-2"
+  "SL-2 liability DIVERGES in round 1: contract=40.0 boards=0.0"
+  (oracle.sl 1 "tamper"))
+(expect-failure "SL-0a CONTROL and the sweep inside every check catches it"
+  "SL-2 liability DIVERGES in round 1"
+  (oracle.check 5 "tamper"))
+(rollback-tx)
+(begin-tx)
+(acquire-module-admin n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots)
+(update n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.boards "2|k:b0b0000000000000000000000000000000000000000000000000000000000002" { "claimed": false })
+(expect-failure "SL-0b CONTROL a claimed count that disagrees with the board rows fails SL-1"
+  "SL-1 settled 3 != claimed boards in round 2"
+  (oracle.sl 2 "tamper"))
+(rollback-tx)
+(begin-tx)
+(acquire-module-admin n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots)
+(update n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.game-table "slots" { "reserved": 1.0 })
+(expect-failure "SL-0c CONTROL an aggregate that disagrees with the rounds fails the oracle"
+  "reserved DIVERGES contract=1.0 oracle=0.0"
+  (oracle.check 5 "tamper"))
+(rollback-tx)
+;; SL-2 reads each board's OWN entries. Round 1's free-spins board (100x) is
+;; put back to unsettled with the round owing 100 x 2.0: SL-2 holds. The same
+;; tamper with the entry's machine moved to big (250x) fails SL-2 with the
+;; per-board recompute, so the entry's machine is load-bearing in the check.
+(begin-tx)
+(acquire-module-admin n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots)
+(update n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.boards "1|k:a11ce00000000000000000000000000000000000000000000000000000000001" { "claimed": false })
+(update n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.rounds "1" { "liability": 200.0, "settled": 2 })
+(expect "SL-0e CONTROL an unsettled free-spins board of 2.0 owing 100 x 2.0 passes SL-2" "tamper ok"
+  (oracle.sl 1 "tamper"))
+(update n_48867b242317a0216a67f8c7ca26696b5878e0e3.slots.boards "1|k:a11ce00000000000000000000000000000000000000000000000000000000001"
+  { "entries": [{ "machine": 2, "stake": 0.1, "spins": 20 }] })
+(expect-failure "SL-0f the same board on the big machine owes 250 x 2.0, and SL-2 says so"
+  "SL-2 liability DIVERGES in round 1: contract=200.0 boards=500.0"
+  (oracle.sl 1 "tamper"))
+(rollback-tx)
+(env-sigs [])
+(begin-tx)
+(expect "SL-0d the rollbacks left the books as they were" "after controls ok"
+  (oracle.check 5 "after controls"))
+(commit-tx)
+
+(print "slots accounting oracle: contract and independent recompute agreed at every step, and the board ledger held SL-1..SL-3")

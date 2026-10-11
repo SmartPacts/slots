@@ -1,0 +1,37 @@
+;; slots-load-gate-must-fail.repl — INVERTED CONTROL: this file must FAIL to run.
+;;
+;; slots.pact opens with a load-time enforce-guard on the spt-gov keyset, so only
+;; the admin keys can install or upgrade it. Every suite loads it WITH that key,
+;; so no suite can see the line go. This file reproduces the harness up to the
+;; load with NO signature in scope. The gate runs it and requires exit 1 with the
+;; engine's "Keyset failure". If the load-time guard is ever removed, the module
+;; loads clean, the final print runs, and the gate turns RED.
+(begin-tx)
+(module test-ns GOVERNANCE
+  (defcap GOVERNANCE () (enforce false "fixture"))
+  (defconst NS-GUARD (create-user-guard (succeed)))
+  (defun succeed () true))
+(define-namespace "n_48867b242317a0216a67f8c7ca26696b5878e0e3" test-ns.NS-GUARD test-ns.NS-GUARD)
+(commit-tx)
+(begin-tx)
+(load "../vendor/fixtures/fungible-v2.pact")
+(load "../vendor/fixtures/fungible-xchain-v1.pact")
+(load "../vendor/fixtures/coin.pact")
+(create-table coin.coin-table)
+(create-table coin.allocation-table)
+(commit-tx)
+(begin-tx)
+(load "../modules/drand.pact")
+(commit-tx)
+(env-data { "gov-admin": { "keys": ["476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef"], "pred": "keys-all" } })
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(namespace "n_48867b242317a0216a67f8c7ca26696b5878e0e3")
+(define-keyset "n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-gov" (read-keyset "gov-admin"))
+(commit-tx)
+;; MUST FAIL: no spt-gov signature is in scope for the load below
+(env-sigs [])
+(begin-tx)
+(load "../modules/slots.pact")
+(commit-tx)
+(print "UNEXPECTED: slots.pact loaded with NO admin signature")
