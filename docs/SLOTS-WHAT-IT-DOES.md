@@ -130,7 +130,7 @@ Classic, easy and big return exactly 983/1024, wild 7865/8192, tumble 19651/2048
 ✅ The limit bounds the whole round rather than one player, so a round can fill up and a board is then refused until the next one.
 ✅ The largest board a round takes on a machine is its remaining room divided by that machine's top prize plus its fee, so a machine with a bigger top prize has a smaller table.
 ✅ The limit counts every board in a round together: two boards each at their machine's own largest figure do not both fit in one round.
-🟡 What the pot is sized to keep through a year of play is 1% of its spare capital divided by the machine's top prize: a simulation result, shown beside each maximum once the play page is published, and never a limit the contract enforces.
+🟡 What the pot is sized to keep through a year of play is 1% of its spare capital divided by the machine's top prize: a simulation result, shown beside each maximum on the play page, and never a limit the contract enforces.
 
 **The earnings account.**
 ✅ Where the house's earnings go is fixed once at the start and can never be named again.
@@ -333,8 +333,6 @@ are listed so this page accounts for every function in the contract, with nothin
 ## What is not built, or not true today
 
 - ⛔ **A locked contract.**
-- ⛔ **The contract on a public chain.** Slots is not deployed anywhere yet, so no helper settles its boards.
-- ⛔ **The play page.** A board's spins are shown nowhere but on the chain.
 
 ---
 

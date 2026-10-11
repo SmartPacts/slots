@@ -144,11 +144,10 @@ by a script in our private repository that reads the contract source, the verifi
 results and a manifest of which test backs which promise. That generator is not published, so from
 here its ✅ marks are our claim rather than something you can re-run. Its header names the
 generator and its source for exactly that reason. The checkable version is the player terms above,
-plus the suites themselves. 🔴 **The copy here was generated before the deployment**, from the
-tagged source that was deployed: its "not built" list still says the contract is not deployed on a
-public chain and that no play page exists. For where it runs, trust
-[`deployments/mainnet01-chain-2.md`](deployments/mainnet01-chain-2.md); the page will be
-regenerated.
+plus the suites themselves. The copy here was regenerated on 2026-10-11, after the deployment, from
+the same tagged source; its one remaining "not built" item is the lock (the contract is upgradeable by
+design, as the terms say). For where it runs, trust
+[`deployments/mainnet01-chain-2.md`](deployments/mainnet01-chain-2.md).
 
 Read all of it against the module and tell us if you find a sentence the code does not support.
 
