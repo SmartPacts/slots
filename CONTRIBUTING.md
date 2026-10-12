@@ -21,3 +21,8 @@ Improvements to the helper under `crank/` are welcome too. It is a plain Node pr
 no privilege the contract recognises, and anyone may run one.
 
 For anything you would rather not post in public, see [SECURITY.md](SECURITY.md).
+
+## What you send
+
+By sending a pull request you confirm that you hold the rights to the change and that Smart
+Pacts may use it under this repository's licence.

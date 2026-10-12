@@ -1,13 +1,22 @@
 Slots
 Copyright 2026 Smart Pacts
 
+LICENCE. From 2026-10-12 (the commit that introduced this notice) onward this repository is
+licensed under the PolyForm Strict License 1.0.0 — see LICENSE. You may read it, run it and
+verify it against the chain for any noncommercial purpose. You may not distribute it, change
+it, or deploy or use it commercially without written permission from Smart Pacts.
+
+Versions up to and including commit 7f0caf75a408 were published under the Apache-2.0 licence, and
+that licence stands for those versions. Nothing from this commit on is under Apache-2.0.
+
 This product includes software developed at Smart Pacts.
 
 VENDORED. Under pact/vendor/ are copies of code the contract depends on, kept only so the test
 suite can load the dependencies the contract compiles against:
 
   * fixtures/coin.pact, fixtures/fungible-v2.pact, fixtures/fungible-xchain-v1.pact —
-    Kadena's coin contract (a test fixture of it) and fungible interfaces. Not ours.
+    Kadena's coin contract (a test fixture of it) and fungible interfaces. Not ours: Kadena's, under its BSD-3-Clause licence
+    (github.com/kadena-io/chainweb-node, LICENSE).
 
 They are not part of the deployed artifact. On chain the contract resolves the real `coin` by
 name.

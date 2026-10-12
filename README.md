@@ -189,4 +189,7 @@ See [SECURITY.md](SECURITY.md) — open a **GitHub security advisory** on this r
 
 ## Licence
 
-Apache-2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+PolyForm Strict 1.0.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE). Read it, run it and check it
+against the chain freely for noncommercial purposes; do not redistribute, change or deploy it
+commercially without written permission from Smart Pacts. Versions before 2026-10-12 were
+published under Apache-2.0 and stay that way; NOTICE names the exact commit.
